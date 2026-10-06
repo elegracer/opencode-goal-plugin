@@ -35,9 +35,9 @@ opencode2 plugin add git+https://github.com/elegracer/opencode-goal-plugin.git
 
 > `git+https://…` (or the `github:` shorthand) is the canonical git spec; a bare `https://github.com/…` URL is treated as a tarball URL by package managers and does not work. Branches/tags/commits are supported: `git+https://github.com/elegracer/opencode-goal-plugin.git#main`.
 >
-> The package has zero runtime dependencies and commits its compiled `dist/` plus a root `index.js` entry, so git installs need no build or `npm install` step and load directly.
+> The package has zero runtime dependencies, no npm scripts, and no lockfile, and commits its compiled `dist/` plus a root `index.js` entry. That is deliberate: the OpenCode 2 host's embedded npm cannot run the "git dependency preparation" step on this build, but it skips preparation entirely for packages with nothing to prepare. Keeping the manifest minimal makes `github:` / `git+https://…` installs work out of the box.
 >
-> Verified against OpenCode `v2.0.22` on Linux: plugin load, tool calls, command handling, auto-continuation, and evidence-gated completion.
+> Verified against OpenCode `v2.0.22` on Linux: git install via `opencode2 plugin add`, plugin load, tool calls, command handling, auto-continuation, and evidence-gated completion.
 
 With options (all optional):
 
@@ -152,14 +152,15 @@ The model gets a small tool surface, all persisted and audited:
 
 ## Development
 
+The published manifest intentionally has no scripts, devDependencies, or lockfile so git installs skip npm's git-preparation step (see Install). Develop with direct commands:
+
 ```sh
-npm install        # dev-only: TypeScript for building
-npm run build      # tsc -> dist/
-npm test           # build + node:test suite
-npm run typecheck
+npm install --no-save typescript   # dev-only, does not modify package.json
+npx tsc -p tsconfig.json           # typecheck + build dist/
+node --test "test/*.test.mjs"      # unit/integration tests (run after build)
 ```
 
-`dist/` is committed on purpose so git installs work without a build step.
+`dist/` is committed on purpose so installs work without a build step. After changing `src/`, run `npx tsc -p tsconfig.json` and commit the updated `dist/`.
 
 ## License
 

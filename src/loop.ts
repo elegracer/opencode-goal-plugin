@@ -1,0 +1,223 @@
+/**
+ * Continuation loop coordinator.
+ *
+ * Turn boundaries come from `session.execution.*` events (the reliable V2
+ * boundary); `session.idle` is only a fallback for builds that do not deliver
+ * execution events, and duplicates are filtered by event id and a short
+ * time window. The loop never has more than one continuation in flight per
+ * session.
+ */
+
+import type { GoalRecord } from "./types.js";
+import { errorText } from "./util.js";
+
+export interface LoopDeps {
+  /** Returns the goal when a continuation is allowed right now, else undefined. */
+  canContinue: (sessionID: string) => Promise<GoalRecord | undefined>;
+  sendContinuation: (sessionID: string, goal: GoalRecord) => Promise<void>;
+  onPromptFailure: (sessionID: string, error: unknown) => Promise<void>;
+  log: (message: string, data?: unknown) => void;
+}
+
+export interface BoundaryResult {
+  duplicate: boolean;
+  /** True when the boundary closes a goal continuation turn. */
+  wasGoalTurn: boolean;
+  hadToolCall: boolean;
+}
+
+interface LoopState {
+  busy: boolean;
+  compacting: boolean;
+  retrying: boolean;
+  retryTimer?: ReturnType<typeof setTimeout>;
+  /** True from the moment a continuation prompt is admitted until its boundary. */
+  awaitingBoundary: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+  lastBoundaryEventID?: string;
+  lastBoundaryAt: number;
+  turnHadToolCall: boolean;
+  promptFailures: number;
+  wrapUpSent: boolean;
+}
+
+function freshState(): LoopState {
+  return {
+    busy: false,
+    compacting: false,
+    retrying: false,
+    awaitingBoundary: false,
+    lastBoundaryAt: 0,
+    turnHadToolCall: false,
+    promptFailures: 0,
+    wrapUpSent: false,
+  };
+}
+
+export class ContinuationLoop {
+  private readonly states = new Map<string, LoopState>();
+  private readonly intervalMs: number;
+  private disposed = false;
+
+  constructor(private readonly deps: LoopDeps, intervalMs: number) {
+    this.intervalMs = Math.max(100, intervalMs);
+  }
+
+  private state(sessionID: string): LoopState {
+    let state = this.states.get(sessionID);
+    if (!state) {
+      state = freshState();
+      this.states.set(sessionID, state);
+    }
+    return state;
+  }
+
+  noteExecutionStarted(sessionID: string): void {
+    const state = this.state(sessionID);
+    state.busy = true;
+    state.turnHadToolCall = false;
+    state.retrying = false;
+    if (state.retryTimer) {
+      clearTimeout(state.retryTimer);
+      state.retryTimer = undefined;
+    }
+  }
+
+  noteToolCall(sessionID: string): void {
+    this.state(sessionID).turnHadToolCall = true;
+  }
+
+  isRetrying(sessionID: string): boolean {
+    return this.state(sessionID).retrying;
+  }
+
+  noteRetryScheduled(sessionID: string): void {
+    const state = this.state(sessionID);
+    state.retrying = true;
+    if (state.retryTimer) clearTimeout(state.retryTimer);
+    // A retry that never materializes must not suppress goal handling forever.
+    state.retryTimer = setTimeout(() => {
+      state.retrying = false;
+      state.retryTimer = undefined;
+      void this.schedule(sessionID);
+    }, 60_000);
+  }
+
+  noteCompaction(sessionID: string, active: boolean): void {
+    this.state(sessionID).compacting = active;
+  }
+
+  /** Clear transient state; the in-flight prompt itself cannot be retracted. */
+  cancel(sessionID: string): void {
+    const state = this.state(sessionID);
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = undefined;
+    state.awaitingBoundary = false;
+  }
+
+  cancelAll(): void {
+    for (const sessionID of this.states.keys()) this.cancel(sessionID);
+  }
+
+  /**
+   * Process a turn boundary. `source` is "execution" for
+   * session.execution.succeeded and "idle" for the fallback session.idle.
+   */
+  noteBoundary(sessionID: string, eventID: string | undefined, source: "execution" | "idle"): BoundaryResult {
+    const state = this.state(sessionID);
+    const now = Date.now();
+
+    if (source === "idle") {
+      // A reliable execution boundary for the same turn suppresses idle.
+      if (now - state.lastBoundaryAt < 2_000) return { duplicate: true, wasGoalTurn: false, hadToolCall: false };
+    }
+
+    if (eventID && state.lastBoundaryEventID === eventID) {
+      return { duplicate: true, wasGoalTurn: false, hadToolCall: false };
+    }
+    if (eventID) state.lastBoundaryEventID = eventID;
+    state.lastBoundaryAt = now;
+    state.busy = false;
+
+    const wasGoalTurn = state.awaitingBoundary;
+    state.awaitingBoundary = false;
+    const hadToolCall = state.turnHadToolCall;
+    state.turnHadToolCall = false;
+    return { duplicate: false, wasGoalTurn, hadToolCall };
+  }
+
+  noteFailure(sessionID: string): void {
+    const state = this.state(sessionID);
+    state.busy = false;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = undefined;
+    state.awaitingBoundary = false;
+  }
+
+  /** Returns the number of consecutive prompt failures after this one. */
+  notePromptFailure(sessionID: string): number {
+    const state = this.state(sessionID);
+    state.promptFailures += 1;
+    return state.promptFailures;
+  }
+
+  resetPromptFailures(sessionID: string): void {
+    this.state(sessionID).promptFailures = 0;
+  }
+
+  wrapUpAlreadySent(sessionID: string): boolean {
+    return this.state(sessionID).wrapUpSent;
+  }
+
+  markWrapUpSent(sessionID: string): void {
+    this.state(sessionID).wrapUpSent = true;
+  }
+
+  /** Schedule exactly one continuation if allowed. */
+  async schedule(sessionID: string): Promise<void> {
+    if (this.disposed) return;
+    const state = this.state(sessionID);
+    if (state.timer || state.awaitingBoundary) return;
+    if (state.busy || state.compacting || state.retrying) return;
+
+    const goal = await this.deps.canContinue(sessionID);
+    if (!goal) return;
+    if (this.disposed || state.timer || state.awaitingBoundary) return;
+    if (state.busy || state.compacting || state.retrying) return;
+
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      void this.fire(sessionID, goal.goalID);
+    }, this.intervalMs);
+  }
+
+  private async fire(sessionID: string, goalID: string): Promise<void> {
+    if (this.disposed) return;
+    const state = this.state(sessionID);
+    if (state.busy || state.compacting || state.retrying || state.awaitingBoundary) return;
+
+    const goal = await this.deps.canContinue(sessionID);
+    if (!goal || goal.goalID !== goalID) return;
+    if (state.busy || state.compacting || state.retrying || state.awaitingBoundary) return;
+
+    state.awaitingBoundary = true;
+    try {
+      await this.deps.sendContinuation(sessionID, goal);
+      state.promptFailures = 0;
+      this.deps.log("continuation sent", { sessionID });
+    } catch (error) {
+      state.awaitingBoundary = false;
+      this.deps.log("continuation prompt failed", { sessionID, error: errorText(error) });
+      await this.deps.onPromptFailure(sessionID, error);
+    }
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    for (const state of this.states.values()) {
+      if (state.timer) clearTimeout(state.timer);
+      if (state.retryTimer) clearTimeout(state.retryTimer);
+    }
+    this.states.clear();
+  }
+}

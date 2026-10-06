@@ -1,0 +1,42 @@
+{
+  "name": "opencode-goal-plugin",
+  "version": "0.1.0",
+  "description": "Persistent session goals for OpenCode 2 (opencode2): /goal workflow, evidence-gated completion, budgeted auto-continuation. V2-only, zero runtime dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "index.js",
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "opencode",
+    "opencode2",
+    "opencode-plugin",
+    "goal",
+    "agent",
+    "autonomous",
+    "goal-mode"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elegracer/opencode-goal-plugin.git"
+  },
+  "engines": {
+    "opencode": ">=2.0.22"
+  }
+}

@@ -60,6 +60,16 @@ With options (all optional):
 
 Restart OpenCode after changing the plugin list.
 
+### Updating
+
+The host caches git plugin resolution, so a new commit may not appear until the cache is refreshed. Prefer pinning a commit for reproducible installs:
+
+```jsonc
+{ "package": "github:elegracer/opencode-goal-plugin#<commit>" }
+```
+
+To force a clean re-resolve on this build: remove `~/.cache/opencode/npm/git-opencode-goal-plugin-*`, delete npm cache index entries mentioning the repo (`grep -rl elegracer/opencode-goal-plugin ~/.npm/_cacache/index-v5`), then restart OpenCode.
+
 ## Usage
 
 ```

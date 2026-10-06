@@ -412,6 +412,29 @@ test("RPC exposes goal snapshots and emits updates", async () => {
   controller.dispose();
 });
 
+test("RPC finds goals from another location scope", async () => {
+  const harness = createHarness({ options: { continuationIntervalMs: 110, verification: "evidence" } });
+  const first = new GoalController(harness.ctx);
+  await first.start();
+  await harness.runCommand("fix tests");
+
+  // A second plugin instance for a different project/location but the same
+  // storage serves the RPC (the TUI client's default location often differs
+  // from the session's project).
+  const otherCtx = {
+    ...harness.ctx,
+    location: { directory: "/other/project", project: { id: "proj_other" } },
+  };
+  const second = new GoalController(otherCtx);
+  await second.start();
+  const otherRegistration = harness.rpcRegistrations[harness.rpcRegistrations.length - 1];
+  const payload = JSON.parse((await otherRegistration.handlers.get({ sessionID: "ses_main" })).payload);
+  assert.equal(payload.present, true);
+  assert.equal(payload.objective, "fix tests");
+  first.dispose();
+  second.dispose();
+});
+
 test("compaction hook injects a goal snapshot for the summarizer", async () => {
   const { harness, controller } = await setup();
   await harness.runCommand("fix tests --criteria \"tests pass\"");

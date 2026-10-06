@@ -44,6 +44,57 @@ export class GoalStore {
     claimKey(sessionID, purpose) {
         return `${this.scopePrefix()}claim/${encodeURIComponent(sessionID)}-${purpose}`;
     }
+    /**
+     * Location-independent index key per session. Lets a different plugin
+     * instance (or an RPC call carrying another location) find a goal's actual
+     * storage scope.
+     */
+    indexKey(sessionID) {
+        return `goal/index/${STORAGE_VERSION}/${encodeURIComponent(sessionID)}`;
+    }
+    /** Write only the location index entry for an existing record. */
+    async ensureIndex(goal) {
+        await this.storage.set(this.indexKey(goal.sessionID), {
+            projectID: goal.projectID,
+            directory: goal.locationDirectory,
+            workspaceID: goal.workspaceID,
+        });
+    }
+    /** Load a goal from any scope through the session index. */
+    async loadByIndex(sessionID) {
+        const entry = await this.storage.get(this.indexKey(sessionID));
+        if (!isRecord(entry))
+            return undefined;
+        const projectID = typeof entry.projectID === "string" ? entry.projectID : undefined;
+        const directory = typeof entry.directory === "string" ? entry.directory : undefined;
+        if (!projectID || !directory)
+            return undefined;
+        const workspaceID = typeof entry.workspaceID === "string" ? entry.workspaceID : undefined;
+        const store = new GoalStore(this.storage, { projectID, directory, workspaceID });
+        return store.load(sessionID);
+    }
+    /**
+     * Last-resort lookup: scan every scope for a record with this session ID.
+     * Used by RPC when the index is missing (records saved before it existed).
+     */
+    async findBySession(sessionID) {
+        const prefix = `goal/${STORAGE_VERSION}/`;
+        let after;
+        for (let page = 0; page < 20; page++) {
+            const result = await this.storage.scan({ prefix, after, limit: 200 });
+            for (const entry of result.entries) {
+                if (entry.key.includes("/claim/") || entry.key.startsWith("goal/index/"))
+                    continue;
+                const record = this.validate(entry.value, sessionID);
+                if (record)
+                    return record;
+            }
+            if (!result.next)
+                break;
+            after = result.next;
+        }
+        return undefined;
+    }
     validate(value, sessionID) {
         if (!isRecord(value))
             return undefined;
@@ -75,6 +126,11 @@ export class GoalStore {
     }
     async save(goal) {
         await this.storage.set(this.key(goal.sessionID), JSON.parse(JSON.stringify(goal)));
+        await this.storage.set(this.indexKey(goal.sessionID), {
+            projectID: goal.projectID,
+            directory: goal.locationDirectory,
+            workspaceID: goal.workspaceID,
+        });
     }
     /**
      * Serialized read-modify-write. The mutator may return undefined to remove
@@ -88,6 +144,7 @@ export class GoalStore {
             const next = mutator(current);
             if (!next) {
                 await this.storage.remove(this.key(sessionID));
+                await this.storage.remove(this.indexKey(sessionID));
                 this.onMutate?.(sessionID);
                 return undefined;
             }

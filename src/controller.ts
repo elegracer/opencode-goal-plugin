@@ -157,7 +157,8 @@ export class GoalController implements GoalToolApiLike {
 
   private async snapshotPayload(sessionID: string): Promise<string> {
     if (!sessionID) return JSON.stringify({ present: false });
-    const goal = await this.store.load(sessionID);
+    const info = await this.sessionInfo(sessionID);
+    const goal = await this.loadGoalForSession(sessionID, info);
     if (!goal) return JSON.stringify({ present: false });
     const now = nowIso();
     return JSON.stringify({
@@ -178,6 +179,38 @@ export class GoalController implements GoalToolApiLike {
       evidenceCount: goal.evidence.length,
       updatedAt: goal.updatedAt,
     });
+  }
+
+  /**
+   * Load a goal using the session's own project/location scope. The TUI/RPC
+   * client carries its own default location, which can differ from the
+   * session's project (e.g. a goal created in the repo session viewed from a
+   * TUI started elsewhere), so the instance store scope cannot be assumed.
+   */
+  private async loadGoalForSession(
+    sessionID: string,
+    info: SessionInfo | undefined,
+  ): Promise<GoalRecord | undefined> {
+    const direct = await this.store.load(sessionID);
+    if (direct) return direct;
+    const projectID = typeof info?.projectID === "string" ? info.projectID : this.ctx.location.project.id;
+    const directory =
+      typeof info?.location?.directory === "string" ? info.location.directory : this.ctx.location.directory;
+    const workspaceID =
+      typeof info?.location?.workspaceID === "string" ? info.location.workspaceID : this.ctx.location.workspaceID;
+    if (
+      projectID !== this.ctx.location.project.id ||
+      directory !== this.ctx.location.directory ||
+      workspaceID !== this.ctx.location.workspaceID
+    ) {
+      const store = new GoalStore(this.ctx.storage, { projectID, directory, workspaceID });
+      const scoped = await store.load(sessionID);
+      if (scoped) return scoped;
+    }
+    // Last resort: the location-independent index, then a full scan.
+    const indexed = await this.store.loadByIndex(sessionID);
+    if (indexed) return indexed;
+    return this.store.findBySession(sessionID);
   }
 
   // ── Cross-instance claim arbitration ─────────────────────────────────────
@@ -289,6 +322,8 @@ export class GoalController implements GoalToolApiLike {
       const records = await this.store.scan();
       let recovered = 0;
       for (const record of records) {
+        // Backfill the location index for records saved before it existed.
+        await this.store.ensureIndex(record);
         if (record.status !== "active") continue;
         await this.store.mutate(record.sessionID, (current) => {
           if (!current || current.goalID !== record.goalID || current.status !== "active") return current;

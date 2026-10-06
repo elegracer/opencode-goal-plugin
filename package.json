@@ -20,9 +20,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test \"test/*.test.mjs\""
   },
-  "devDependencies": {
-    "typescript": "^5.9.3"
-  },
   "keywords": [
     "opencode",
     "opencode2",

@@ -15,11 +15,14 @@ import { ContinuationLoop } from "./loop.js";
 import { resolveOptions } from "./options.js";
 import { buildSystemBlock, continuationText, INTERNAL_METADATA_KEY, wrapUpText } from "./prompts.js";
 import { GoalStore } from "./store.js";
+import { GoalRpc } from "./rpc.js";
 import { accountUsage, activeMsAt, addTask, blockGoal, cancelGoal, completeGoal, editGoal, limitGoal, pauseGoal, pushHistory, recordCheckpoint, resumeGoal, settleTurn, startGoal, statusLabel, taskSummary, updateTask, } from "./state.js";
 import { goalToolDefinitions } from "./tools.js";
-import { asNumber, asString, errorText, isRecord, nowIso, truncate } from "./util.js";
+import { asNumber, asString, errorText, isRecord, makeID, nowIso, truncate } from "./util.js";
 import { extractTranscript, verifyCompletion } from "./verify.js";
 export const PLUGIN_ID = "opencode-goal";
+/** Continuations admitted within this window are considered the same turn (cross-instance dedup). */
+const CONTINUATION_DEDUP_MS = 10_000;
 export class GoalController {
     ctx;
     options;
@@ -30,6 +33,8 @@ export class GoalController {
     sessions = new Map();
     usageStates = new Map();
     failureTimers = new Map();
+    updateTimers = new Map();
+    rpcRegistration;
     disposed = false;
     constructor(ctx) {
         this.ctx = ctx;
@@ -38,7 +43,7 @@ export class GoalController {
             projectID: ctx.location.project.id,
             directory: ctx.location.directory,
             workspaceID: ctx.location.workspaceID,
-        });
+        }, (sessionID) => this.scheduleGoalUpdate(sessionID));
         this.loop = new ContinuationLoop({
             canContinue: (sessionID) => this.canContinue(sessionID),
             sendContinuation: (sessionID, goal) => this.sendContinuation(sessionID, goal),
@@ -47,6 +52,7 @@ export class GoalController {
         }, this.options.continuationIntervalMs);
     }
     async start() {
+        await this.registerRpc();
         await this.recover();
         await this.registerCommand();
         await this.registerTools();
@@ -61,7 +67,92 @@ export class GoalController {
         for (const timer of this.failureTimers.values())
             clearTimeout(timer);
         this.failureTimers.clear();
+        for (const timer of this.updateTimers.values())
+            clearTimeout(timer);
+        this.updateTimers.clear();
         this.candidates.clearAll();
+        void this.rpcRegistration?.dispose?.();
+    }
+    // ── RPC (TUI sidebar) ────────────────────────────────────────────────────
+    async registerRpc() {
+        try {
+            if (!this.ctx.rpc?.register)
+                return;
+            this.rpcRegistration = await this.ctx.rpc.register(GoalRpc, {
+                get: async (input) => ({ payload: await this.snapshotPayload(asString(input?.sessionID) ?? "") }),
+            });
+        }
+        catch (error) {
+            this.log("rpc registration failed", errorText(error));
+        }
+    }
+    scheduleGoalUpdate(sessionID) {
+        if (!this.rpcRegistration || this.disposed)
+            return;
+        const existing = this.updateTimers.get(sessionID);
+        if (existing)
+            clearTimeout(existing);
+        const timer = setTimeout(() => {
+            this.updateTimers.delete(sessionID);
+            void this.rpcRegistration?.events
+                .emit("updated", { sessionID })
+                .catch((error) => this.log("rpc event failed", errorText(error)));
+        }, 80);
+        this.updateTimers.set(sessionID, timer);
+    }
+    async snapshotPayload(sessionID) {
+        if (!sessionID)
+            return JSON.stringify({ present: false });
+        const goal = await this.store.load(sessionID);
+        if (!goal)
+            return JSON.stringify({ present: false });
+        const now = nowIso();
+        return JSON.stringify({
+            present: true,
+            objective: goal.objective,
+            status: goal.status,
+            stopReason: goal.stopReason,
+            recovered: goal.recovered ?? false,
+            used: goal.used,
+            limits: goal.unbounded ? { unbounded: true } : goal.limits,
+            activeMs: activeMsAt(goal, now),
+            tasks: taskSummary(goal),
+            taskItems: (goal.tasks ?? []).slice(0, 8).map((task) => ({
+                id: task.id,
+                title: task.title,
+                status: task.status,
+            })),
+            evidenceCount: goal.evidence.length,
+            updatedAt: goal.updatedAt,
+        });
+    }
+    // ── Cross-instance claim arbitration ─────────────────────────────────────
+    /**
+     * Best-effort exactly-one arbitration across plugin instances sharing the
+     * same storage: every contender writes a nonce, waits, then re-reads; only
+     * the value that survived wins. Prevents duplicate continuation prompts
+     * when several live plugin instances observe the same boundary (found live:
+     * two prompts 2ms apart).
+     */
+    async claim(sessionID, purpose) {
+        const key = this.store.claimKey(sessionID, purpose);
+        const nonce = makeID("claim");
+        try {
+            await this.ctx.storage.set(key, { nonce, at: Date.now() });
+        }
+        catch {
+            return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 50));
+        try {
+            const current = await this.ctx.storage.get(key);
+            if (!isRecord(current))
+                return true;
+            return current.nonce === nonce;
+        }
+        catch {
+            return true;
+        }
     }
     log(message, data) {
         if (!this.options.debug && data === undefined)
@@ -556,6 +647,8 @@ export class GoalController {
             return;
         if (fresh.history.some((entry) => entry.action === "wrap-up"))
             return;
+        if (!(await this.claim(sessionID, "wrapup")))
+            return;
         try {
             await this.ctx.session.prompt({
                 sessionID,
@@ -588,6 +681,18 @@ export class GoalController {
         return goal;
     }
     async sendContinuation(sessionID, goal) {
+        const fresh = await this.store.load(sessionID);
+        if (!fresh || fresh.goalID !== goal.goalID || fresh.status !== "active")
+            return false;
+        // Cross-instance / cross-turn dedup: a continuation admitted within the
+        // window is authoritative; another instance already sent it.
+        if (fresh.lastContinuationAt && Date.now() - fresh.lastContinuationAt < CONTINUATION_DEDUP_MS)
+            return false;
+        if (!(await this.claim(sessionID, "continuation")))
+            return false;
+        const still = await this.store.load(sessionID);
+        if (!still || still.goalID !== goal.goalID || still.status !== "active")
+            return false;
         await this.ctx.session.prompt({
             sessionID,
             text: continuationText(goal),
@@ -597,10 +702,12 @@ export class GoalController {
             if (current && current.goalID === goal.goalID && current.status === "active") {
                 current.used.turns += 1;
                 current.promptFailures = 0;
+                current.lastContinuationAt = Date.now();
                 current.updatedAt = nowIso();
             }
             return current;
         });
+        return true;
     }
     async onPromptFailure(sessionID, error) {
         const updated = await this.store.mutate(sessionID, (current) => {

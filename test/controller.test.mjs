@@ -371,6 +371,47 @@ test("goal_clear tool defers to the user", async () => {
   controller.dispose();
 });
 
+test("two plugin instances send only one continuation", async () => {
+  const harness = createHarness({ options: { continuationIntervalMs: 120, verification: "evidence" } });
+  const first = new GoalController(harness.ctx);
+  await first.start();
+  const second = new GoalController(harness.ctx);
+  await second.start();
+  await harness.runCommand("fix tests");
+  harness.prompts.length = 0;
+  harness.emitEvent("session.execution.started", { sessionID: "ses_main" });
+  harness.emitEvent("session.execution.succeeded", { sessionID: "ses_main" });
+  await harness.wait(600);
+  const continuations = harness.prompts.filter((prompt) => /Continue working/.test(prompt.text ?? ""));
+  assert.equal(continuations.length, 1);
+  const goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.used.turns, 1);
+  first.dispose();
+  second.dispose();
+});
+
+test("RPC exposes goal snapshots and emits updates", async () => {
+  const { harness, controller } = await setup();
+  assert.equal(harness.rpcRegistrations.length, 1);
+  const registration = harness.rpcRegistrations[0];
+  let payload = JSON.parse((await registration.handlers.get({ sessionID: "ses_main" })).payload);
+  assert.equal(payload.present, false);
+
+  await harness.runCommand("fix tests");
+  await harness.runCommand("task add write tests");
+  await harness.wait(150);
+  payload = JSON.parse((await registration.handlers.get({ sessionID: "ses_main" })).payload);
+  assert.equal(payload.present, true);
+  assert.equal(payload.objective, "fix tests");
+  assert.equal(payload.status, "active");
+  assert.equal(payload.tasks.total, 1);
+  assert.equal(payload.tasks.done, 0);
+  assert.ok(
+    harness.rpcEvents.some((event) => event.name === "updated" && event.payload?.sessionID === "ses_main"),
+  );
+  controller.dispose();
+});
+
 test("compaction hook injects a goal snapshot for the summarizer", async () => {
   const { harness, controller } = await setup();
   await harness.runCommand("fix tests --criteria \"tests pass\"");

@@ -6,15 +6,23 @@
   "license": "MIT",
   "main": "./dist/index.js",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./rpc": "./dist/rpc.js",
+    "./tui": "./dist/tui.js"
   },
   "files": [
     "index.js",
+    "tui.js",
     "dist",
     "src",
     "README.md",
     "LICENSE"
   ],
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.14",
+    "@opentui/solid": ">=0.5.14",
+    "solid-js": ">=1.9.0"
+  },
   "keywords": [
     "opencode",
     "opencode2",

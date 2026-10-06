@@ -10,6 +10,7 @@ function makeDeps(overrides = {}) {
     canContinue: async () => goal,
     sendContinuation: async (sessionID, continuationGoal) => {
       sent.push({ sessionID, goal: continuationGoal });
+      return true;
     },
     onPromptFailure: async (sessionID, error) => {
       failures.push({ sessionID, error });
@@ -113,5 +114,37 @@ test("idle fallback is suppressed right after an execution boundary", async () =
   loop.noteBoundary("s", "evt_1", "execution");
   const idle = loop.noteBoundary("s", "evt_idle", "idle");
   assert.equal(idle.duplicate, true);
+  loop.dispose();
+});
+
+test("idle is never authoritative once execution events are seen", async () => {
+  const { deps } = makeDeps();
+  const loop = new ContinuationLoop(deps, 100);
+  loop.noteBoundary("s", "evt_1", "execution");
+  const idle = loop.noteBoundary("s", "evt_idle", "idle");
+  assert.equal(idle.duplicate, true);
+  assert.equal(idle.wasGoalTurn, false);
+  loop.dispose();
+});
+
+test("a skipped continuation does not count as sent and stays retryable", async () => {
+  let attempts = 0;
+  const { deps, failures } = makeDeps({
+    sendContinuation: async () => {
+      attempts += 1;
+      return false;
+    },
+  });
+  const loop = new ContinuationLoop(deps, 100);
+  loop.noteBoundary("s", "evt_1", "execution");
+  await loop.schedule("s");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(attempts, 1);
+  assert.equal(failures.length, 0);
+
+  loop.noteBoundary("s", "evt_2", "execution");
+  await loop.schedule("s");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(attempts, 2);
   loop.dispose();
 });

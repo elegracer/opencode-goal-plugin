@@ -25,10 +25,12 @@ const VALID_STATUSES = new Set([
 export class GoalStore {
     storage;
     scope;
+    onMutate;
     chains = new Map();
-    constructor(storage, scope) {
+    constructor(storage, scope, onMutate) {
         this.storage = storage;
         this.scope = scope;
+        this.onMutate = onMutate;
     }
     scopePrefix() {
         const project = encodeURIComponent(this.scope.projectID);
@@ -37,6 +39,10 @@ export class GoalStore {
     }
     key(sessionID) {
         return `${this.scopePrefix()}${encodeURIComponent(sessionID)}`;
+    }
+    /** Storage key used for cross-instance claim arbitration. */
+    claimKey(sessionID, purpose) {
+        return `${this.scopePrefix()}claim/${encodeURIComponent(sessionID)}-${purpose}`;
     }
     validate(value, sessionID) {
         if (!isRecord(value))
@@ -77,25 +83,19 @@ export class GoalStore {
      */
     mutate(sessionID, mutator) {
         const previous = this.chains.get(sessionID) ?? Promise.resolve();
-        const run = previous.then(async () => {
+        const execute = async () => {
             const current = await this.load(sessionID);
             const next = mutator(current);
             if (!next) {
                 await this.storage.remove(this.key(sessionID));
+                this.onMutate?.(sessionID);
                 return undefined;
             }
             await this.save(next);
+            this.onMutate?.(sessionID);
             return next;
-        }, async () => {
-            const current = await this.load(sessionID);
-            const next = mutator(current);
-            if (!next) {
-                await this.storage.remove(this.key(sessionID));
-                return undefined;
-            }
-            await this.save(next);
-            return next;
-        });
+        };
+        const run = previous.then(execute, execute);
         this.chains.set(sessionID, run.then(() => undefined, () => undefined));
         return run;
     }

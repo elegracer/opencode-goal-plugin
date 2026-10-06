@@ -127,6 +127,8 @@ export interface GoalRecord {
   tasks: GoalTask[];
   /** Consecutive continuation prompt failures (persisted so restarts do not reset the safety brake). */
   promptFailures?: number;
+  /** Epoch ms of the last admitted continuation prompt (cross-instance dedup). */
+  lastContinuationAt?: number;
   evidence: EvidenceRecord[];
   checkpoints: Checkpoint[];
   history: HistoryEntry[];

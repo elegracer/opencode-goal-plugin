@@ -47,6 +47,7 @@ export class GoalStore {
       }>;
     },
     private readonly scope: StoreScope,
+    private readonly onMutate?: (sessionID: string) => void,
   ) {}
 
   private scopePrefix(): string {
@@ -57,6 +58,11 @@ export class GoalStore {
 
   key(sessionID: string): string {
     return `${this.scopePrefix()}${encodeURIComponent(sessionID)}`;
+  }
+
+  /** Storage key used for cross-instance claim arbitration. */
+  claimKey(sessionID: string, purpose: string): string {
+    return `${this.scopePrefix()}claim/${encodeURIComponent(sessionID)}-${purpose}`;
   }
 
   private validate(value: unknown, sessionID: string): GoalRecord | undefined {
@@ -94,28 +100,19 @@ export class GoalStore {
     mutator: (current: GoalRecord | undefined) => GoalRecord | undefined,
   ): Promise<GoalRecord | undefined> {
     const previous = this.chains.get(sessionID) ?? Promise.resolve();
-    const run = previous.then(
-      async () => {
-        const current = await this.load(sessionID);
-        const next = mutator(current);
-        if (!next) {
-          await this.storage.remove(this.key(sessionID));
-          return undefined;
-        }
-        await this.save(next);
-        return next;
-      },
-      async () => {
-        const current = await this.load(sessionID);
-        const next = mutator(current);
-        if (!next) {
-          await this.storage.remove(this.key(sessionID));
-          return undefined;
-        }
-        await this.save(next);
-        return next;
-      },
-    );
+    const execute = async (): Promise<GoalRecord | undefined> => {
+      const current = await this.load(sessionID);
+      const next = mutator(current);
+      if (!next) {
+        await this.storage.remove(this.key(sessionID));
+        this.onMutate?.(sessionID);
+        return undefined;
+      }
+      await this.save(next);
+      this.onMutate?.(sessionID);
+      return next;
+    };
+    const run = previous.then(execute, execute);
     this.chains.set(
       sessionID,
       run.then(

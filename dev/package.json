@@ -1,0 +1,9 @@
+{
+  "name": "opencode-goal-plugin-dev",
+  "private": true,
+  "description": "Dev-only toolchain for opencode-goal-plugin. Kept out of the package manifest so git installs skip npm's git preparation step.",
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3"
+  }
+}

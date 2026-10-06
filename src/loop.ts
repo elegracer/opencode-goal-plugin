@@ -14,7 +14,8 @@ import { errorText } from "./util.js";
 export interface LoopDeps {
   /** Returns the goal when a continuation is allowed right now, else undefined. */
   canContinue: (sessionID: string) => Promise<GoalRecord | undefined>;
-  sendContinuation: (sessionID: string, goal: GoalRecord) => Promise<void>;
+  /** Returns true when a continuation prompt was actually admitted. */
+  sendContinuation: (sessionID: string, goal: GoalRecord) => Promise<boolean>;
   onPromptFailure: (sessionID: string, error: unknown) => Promise<void>;
   log: (message: string, data?: unknown) => void;
 }
@@ -39,6 +40,8 @@ interface LoopState {
   turnHadToolCall: boolean;
   promptFailures: number;
   wrapUpSent: boolean;
+  /** Once execution events are observed, they are the only trusted boundary. */
+  seenExecution: boolean;
 }
 
 function freshState(): LoopState {
@@ -51,6 +54,7 @@ function freshState(): LoopState {
     turnHadToolCall: false,
     promptFailures: 0,
     wrapUpSent: false,
+    seenExecution: false,
   };
 }
 
@@ -76,6 +80,7 @@ export class ContinuationLoop {
     const state = this.state(sessionID);
     state.busy = true;
     state.turnHadToolCall = false;
+    state.seenExecution = true;
     state.retrying = false;
     if (state.retryTimer) {
       clearTimeout(state.retryTimer);
@@ -127,7 +132,16 @@ export class ContinuationLoop {
     const state = this.state(sessionID);
     const now = Date.now();
 
-    if (source === "idle") {
+    if (source === "execution") {
+      state.seenExecution = true;
+    } else {
+      // `session.idle` is only a fallback for builds that never deliver
+      // execution events. Once they are seen, or while a turn is in flight,
+      // idle must not settle the turn (a late idle otherwise double-schedules
+      // a continuation).
+      if (state.seenExecution || state.busy) {
+        return { duplicate: true, wasGoalTurn: false, hadToolCall: false };
+      }
       // A reliable execution boundary for the same turn suppresses idle.
       if (now - state.lastBoundaryAt < 2_000) return { duplicate: true, wasGoalTurn: false, hadToolCall: false };
     }
@@ -202,7 +216,13 @@ export class ContinuationLoop {
 
     state.awaitingBoundary = true;
     try {
-      await this.deps.sendContinuation(sessionID, goal);
+      const sent = await this.deps.sendContinuation(sessionID, goal);
+      if (!sent) {
+        // Another plugin instance already sent this continuation (or the goal
+        // changed); release the flag without counting a turn or a failure.
+        state.awaitingBoundary = false;
+        return;
+      }
       state.promptFailures = 0;
       this.deps.log("continuation sent", { sessionID });
     } catch (error) {

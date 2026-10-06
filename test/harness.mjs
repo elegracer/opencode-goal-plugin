@@ -11,8 +11,7 @@ export function createHarness(input = {}) {
   const options = input.options ?? {};
 
   const storageMap = new Map();
-  const eventQueue = [];
-  let eventWaiter = null;
+  const subscribers = new Set();
   const hooks = { context: [], prompt: [], compaction: [] };
   const toolAfterHooks = [];
   const commands = new Map();
@@ -23,6 +22,8 @@ export function createHarness(input = {}) {
   const interrupted = [];
   const removed = [];
   const sessionInfos = new Map(Object.entries(input.sessions ?? {}));
+  const rpcRegistrations = [];
+  const rpcEvents = [];
   const transcript = input.transcript ?? [];
   let generateResponse = input.generateResponse ?? { text: "APPROVE\nlooks good" };
   let promptFailuresRemaining = 0;
@@ -131,21 +132,44 @@ export function createHarness(input = {}) {
     },
     event: {
       subscribe() {
+        const subscriber = { queue: [], waiter: null };
+        subscribers.add(subscriber);
         return {
           [Symbol.asyncIterator]() {
             return {
               async next() {
-                if (eventQueue.length > 0) return { value: eventQueue.shift(), done: false };
+                if (subscriber.queue.length > 0) return { value: subscriber.queue.shift(), done: false };
                 return new Promise((resolve) => {
-                  eventWaiter = (event) => resolve({ value: event, done: false });
+                  subscriber.waiter = (event) => resolve({ value: event, done: false });
                 });
               },
               async return() {
+                subscribers.delete(subscriber);
+                subscriber.waiter = null;
                 return { value: undefined, done: true };
               },
             };
           },
         };
+      },
+    },
+    rpc: {
+      async register(definition, handlers) {
+        const registration = {
+          definition,
+          handlers,
+          disposed: false,
+          async dispose() {
+            registration.disposed = true;
+          },
+          events: {
+            async emit(name, payload) {
+              rpcEvents.push({ name, payload });
+            },
+          },
+        };
+        rpcRegistrations.push(registration);
+        return registration;
       },
     },
     generate: {
@@ -169,14 +193,18 @@ export function createHarness(input = {}) {
     removed,
     storageMap,
     sessionInfos,
+    rpcRegistrations,
+    rpcEvents,
     emitEvent(type, data = {}, extra = {}) {
       const event = { id: `evt_${Math.random().toString(36).slice(2)}`, type, data, ...extra };
-      if (eventWaiter) {
-        const waiter = eventWaiter;
-        eventWaiter = null;
-        waiter(event);
-      } else {
-        eventQueue.push(event);
+      for (const subscriber of subscribers) {
+        if (subscriber.waiter) {
+          const waiter = subscriber.waiter;
+          subscriber.waiter = null;
+          waiter(event);
+        } else {
+          subscriber.queue.push(event);
+        }
       }
       return event;
     },

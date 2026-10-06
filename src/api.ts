@@ -197,6 +197,16 @@ export interface PluginContext {
       data?: { id?: string; providerID?: string; variant?: string } | null
     }>
   }
+  /** Optional: custom RPC registration (used by the TUI sidebar). */
+  readonly rpc?: {
+    register: (
+      definition: unknown,
+      handlers: Record<string, (input: any, context: any) => Promise<unknown>>,
+    ) => Promise<{
+      dispose: () => void | Promise<void>
+      events: { emit: (...args: any[]) => Promise<void> }
+    }>
+  }
 }
 
 export interface PluginDefinition {

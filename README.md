@@ -139,11 +139,8 @@ The model gets a small tool surface, all persisted and audited:
 6. **Session scoping** — only root sessions of the plugin's project/location drive continuation. Child (subagent) sessions never drive the loop, but they see the parent goal in context and can read it with `goal_get`.
 7. **Command replies** — OpenCode 2 does not expose a plugin API that writes a user-visible chat message directly; `/goal …` results are delivered as synthetic messages that the model relays to the user on its next turn. State mutations themselves are local and do not depend on the model.
 8. **TUI sidebar (RPC)** — the server plugin registers a `goals.get` RPC and emits `goals.updated` on every goal write (debounced). The `./tui` entry renders a sidebar widget that fetches the snapshot (resolved through the session's own project/location, with a session index fallback) and refreshes on those events; it renders nothing when no goal exists or the RPC is unavailable.
-   - No `cli.json` entry is required. However, when `cli.json` already lists TUI plugins explicitly, some OpenCode 2.0.x builds stop auto-discovering package `./tui` entries and render pre-compiled bundles with a private Solid runtime (effects never run). In that case copy `examples/local-tui-adapter.tsx` to `~/.config/opencode/plugins/opencode-goal/tui.tsx` and add a no-op server stub next to it:
-     ```ts title="~/.config/opencode/plugins/opencode-goal/index.ts"
-     export default { id: "opencode-goal.local", setup: async () => {} }
-     ```
-     The host then transpiles the widget with its own Solid/OpenTUI instances and the sidebar updates live.
+   - No `cli.json` entry is required: the package's `./tui` export loads automatically and updates live (verified against 2.0.22 with an explicit `cli.json` list). Do **not** also install the local adapter in that case — two widgets would render. If you previously installed `~/.config/opencode/plugins/opencode-goal/` (the `examples/local-tui-adapter.tsx` fallback), delete that directory and reopen the TUI.
+   - `examples/local-tui-adapter.tsx` remains only as a fallback for hosts/builds where the pre-compiled package entry is skipped or its effects do not run; it is not needed on current 2.0.22.
    - The sidebar needs the managed service connection. In `--standalone` (private stdio server) mode on 2.0.22 the custom RPC call does not resolve, so the widget stays hidden; run the regular `opencode2` client instead.
 
 ## Options

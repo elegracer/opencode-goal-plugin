@@ -72,6 +72,7 @@ export function startGoal(previous, input) {
         base: input.baseUsage ? { ...input.baseUsage } : previous?.lastUsage ? { ...previous.lastUsage } : undefined,
         stall: { noToolTurns: 0, noProgressTurns: 0, lastOutputTokens: 0 },
         tasks: [],
+        promptFailures: 0,
         evidence: [],
         checkpoints: [],
         history: [],

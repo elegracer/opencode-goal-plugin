@@ -125,6 +125,8 @@ export interface GoalRecord {
   lastUsage?: UsageSnapshot;
   stall: GoalStall;
   tasks: GoalTask[];
+  /** Consecutive continuation prompt failures (persisted so restarts do not reset the safety brake). */
+  promptFailures?: number;
   evidence: EvidenceRecord[];
   checkpoints: Checkpoint[];
   history: HistoryEntry[];

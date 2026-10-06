@@ -30,7 +30,6 @@ export class GoalController {
     sessions = new Map();
     usageStates = new Map();
     failureTimers = new Map();
-    wrapUpSent = new Set();
     disposed = false;
     constructor(ctx) {
         this.ctx = ctx;
@@ -207,6 +206,12 @@ export class GoalController {
             this.log("prompt hook registration failed", errorText(error));
         }
         try {
+            await this.ctx.session.hook("compaction", (event) => this.onCompactionHook(event));
+        }
+        catch (error) {
+            this.log("compaction hook registration failed", errorText(error));
+        }
+        try {
             await this.ctx.tool.hook("execute.after", (event) => this.onToolExecuted(event));
         }
         catch (error) {
@@ -230,6 +235,18 @@ export class GoalController {
         if (!block)
             return;
         event.system.push({ type: "text", text: block, metadata: { plugin: PLUGIN_ID } });
+    }
+    async onCompactionHook(event) {
+        const sessionID = asString(event?.sessionID);
+        if (!sessionID || !Array.isArray(event?.system))
+            return;
+        const root = await this.rootSession(sessionID);
+        const goal = await this.store.load(root);
+        if (!goal || goal.status === "complete" || goal.status === "cancelled")
+            return;
+        const summary = taskSummary(goal);
+        const line = `[opencode-goal] Persist this goal through compaction: ${goal.objective} (status: ${goal.status}${summary.total ? `, tasks ${summary.done}/${summary.total} done` : ""}).`;
+        event.system.push({ type: "text", text: line, metadata: { plugin: PLUGIN_ID } });
     }
     async onPromptHook(event) {
         const sessionID = asString(event?.sessionID);
@@ -533,9 +550,12 @@ export class GoalController {
         await this.loop.schedule(sessionID);
     }
     async sendWrapUp(sessionID, goal) {
-        if (this.wrapUpSent.has(goal.goalID))
+        // Dedup via persisted history so a restart cannot send a second wrap-up.
+        const fresh = await this.store.load(sessionID);
+        if (!fresh || fresh.goalID !== goal.goalID)
             return;
-        this.wrapUpSent.add(goal.goalID);
+        if (fresh.history.some((entry) => entry.action === "wrap-up"))
+            return;
         try {
             await this.ctx.session.prompt({
                 sessionID,
@@ -576,13 +596,20 @@ export class GoalController {
         await this.store.mutate(sessionID, (current) => {
             if (current && current.goalID === goal.goalID && current.status === "active") {
                 current.used.turns += 1;
+                current.promptFailures = 0;
                 current.updatedAt = nowIso();
             }
             return current;
         });
     }
     async onPromptFailure(sessionID, error) {
-        const failures = this.loop.notePromptFailure(sessionID);
+        const updated = await this.store.mutate(sessionID, (current) => {
+            if (current && current.status === "active") {
+                current.promptFailures = (current.promptFailures ?? 0) + 1;
+            }
+            return current;
+        });
+        const failures = updated?.promptFailures ?? 0;
         if (failures < this.options.maxPromptFailures)
             return;
         await this.mutateActive(sessionID, (goal) => {

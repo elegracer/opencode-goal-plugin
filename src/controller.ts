@@ -74,7 +74,6 @@ export class GoalController implements GoalToolApiLike {
   private readonly sessions = new Map<string, SessionCacheEntry>();
   private readonly usageStates = new Map<string, UsageState>();
   private readonly failureTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly wrapUpSent = new Set<string>();
   private disposed = false;
 
   constructor(private readonly ctx: PluginContext) {
@@ -250,6 +249,11 @@ export class GoalController implements GoalToolApiLike {
       this.log("prompt hook registration failed", errorText(error));
     }
     try {
+      await this.ctx.session.hook("compaction", (event: any) => this.onCompactionHook(event));
+    } catch (error) {
+      this.log("compaction hook registration failed", errorText(error));
+    }
+    try {
       await this.ctx.tool.hook("execute.after", (event: any) => this.onToolExecuted(event));
     } catch (error) {
       this.log("tool hook registration failed", errorText(error));
@@ -271,6 +275,19 @@ export class GoalController implements GoalToolApiLike {
     });
     if (!block) return;
     event.system.push({ type: "text", text: block, metadata: { plugin: PLUGIN_ID } });
+  }
+
+  private async onCompactionHook(event: any): Promise<void> {
+    const sessionID = asString(event?.sessionID);
+    if (!sessionID || !Array.isArray(event?.system)) return;
+    const root = await this.rootSession(sessionID);
+    const goal = await this.store.load(root);
+    if (!goal || goal.status === "complete" || goal.status === "cancelled") return;
+    const summary = taskSummary(goal);
+    const line = `[opencode-goal] Persist this goal through compaction: ${goal.objective} (status: ${goal.status}${
+      summary.total ? `, tasks ${summary.done}/${summary.total} done` : ""
+    }).`;
+    event.system.push({ type: "text", text: line, metadata: { plugin: PLUGIN_ID } });
   }
 
   private async onPromptHook(event: any): Promise<void> {
@@ -565,8 +582,10 @@ export class GoalController implements GoalToolApiLike {
   }
 
   private async sendWrapUp(sessionID: string, goal: GoalRecord): Promise<void> {
-    if (this.wrapUpSent.has(goal.goalID)) return;
-    this.wrapUpSent.add(goal.goalID);
+    // Dedup via persisted history so a restart cannot send a second wrap-up.
+    const fresh = await this.store.load(sessionID);
+    if (!fresh || fresh.goalID !== goal.goalID) return;
+    if (fresh.history.some((entry) => entry.action === "wrap-up")) return;
     try {
       await this.ctx.session.prompt({
         sessionID,
@@ -605,6 +624,7 @@ export class GoalController implements GoalToolApiLike {
     await this.store.mutate(sessionID, (current) => {
       if (current && current.goalID === goal.goalID && current.status === "active") {
         current.used.turns += 1;
+        current.promptFailures = 0;
         current.updatedAt = nowIso();
       }
       return current;
@@ -612,7 +632,13 @@ export class GoalController implements GoalToolApiLike {
   }
 
   private async onPromptFailure(sessionID: string, error: unknown): Promise<void> {
-    const failures = this.loop.notePromptFailure(sessionID);
+    const updated = await this.store.mutate(sessionID, (current) => {
+      if (current && current.status === "active") {
+        current.promptFailures = (current.promptFailures ?? 0) + 1;
+      }
+      return current;
+    });
+    const failures = updated?.promptFailures ?? 0;
     if (failures < this.options.maxPromptFailures) return;
     await this.mutateActive(sessionID, (goal) => {
       pauseGoal(goal, `continuation prompt failed ${failures} times: ${errorText(error)}`, nowIso());

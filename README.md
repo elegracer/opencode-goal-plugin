@@ -124,7 +124,7 @@ The model gets a small tool surface, all persisted and audited:
 
 ## How it works
 
-1. **Context injection** — on every primary model call, `session.hook("context")` injects a `<goal_context>` block (objective, criteria, constraints, budget, checkpoints, evidence IDs). The goal text is labeled as user task data and cannot override system/developer/tool policies. Because the block is re-injected each call, compaction cannot lose the goal.
+1. **Context injection** — on every primary model call, `session.hook("context")` injects a `<goal_context>` block (objective, criteria, constraints, budget, tasks, checkpoints, evidence IDs). The goal text is labeled as user task data and cannot override system/developer/tool policies. Because the block is re-injected each call, compaction cannot lose the goal; additionally the `session.hook("compaction")` hook adds a one-line goal snapshot to the summarizer so the summary itself mentions the goal and its task progress.
 2. **Auto-continuation** — turn boundaries come from `session.execution.succeeded` (with `session.idle` only as a fallback, deduplicated by event id and a time window). At most one continuation prompt is in flight per session; user prompts pause continuation by default; `session.execution.interrupted` with reason `user` pauses, while `shutdown`/`superseded`/`inactivity` only cancel pending work; failures are paused only when no automatic retry follows.
 3. **Budget accounting** — token/cost usage comes from `session.usage.updated` (accurate, not estimated). The host reports cumulative session totals, so the plugin differences consecutive snapshots to recover the latest call's own context window (`input + cached input + output + reasoning`) — that per-call number is what `maxTokens` compares against, meaning long session history never counts against a goal's cap. Goals also count continuation turns, cumulative burn, and wall-clock active time. Default caps: 10 turns / 100k context tokens / 30 minutes; `--unbounded` opts out. When a cap trips, the goal becomes `budget_limited` / `usage_limited` / `stalled` and one wrap-up prompt asks for a summary.
 4. **Evidence-gated completion** — every successful tool call is recorded as an evidence candidate keyed by its real call ID. `goal_update complete` must reference one of those exact IDs with a specific summary. Then:
@@ -154,7 +154,7 @@ The model gets a small tool surface, all persisted and audited:
 | `wrapUpOnLimit` | `true` | send one final summary prompt when a cap trips |
 | `commandName` | `"goal"` | rename the slash command |
 | `contextInjectionMaxChars` | `4000` | goal block size cap |
-| `maxPromptFailures` | `3` | consecutive continuation prompt failures before pausing |
+| `maxPromptFailures` | `3` | consecutive continuation prompt failures before pausing (persisted across restarts) |
 | `debug` | `false` | verbose plugin logging |
 
 ## Persistence and limitations

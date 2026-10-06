@@ -370,3 +370,50 @@ test("goal_clear tool defers to the user", async () => {
   assert.equal(goal.status, "active");
   controller.dispose();
 });
+
+test("compaction hook injects a goal snapshot for the summarizer", async () => {
+  const { harness, controller } = await setup();
+  await harness.runCommand("fix tests --criteria \"tests pass\"");
+  await harness.runCommand("task add write tests");
+  const system = await harness.fireCompaction("ses_main");
+  assert.equal(system.length, 1);
+  assert.match(system[0].text, /Persist this goal through compaction/);
+  assert.match(system[0].text, /fix tests/);
+  assert.match(system[0].text, /tasks 0\/1 done/);
+  controller.dispose();
+});
+
+test("persisted prompt failures pause the goal after the threshold", async () => {
+  const { harness, controller } = await setup();
+  await harness.runCommand("fix tests");
+  harness.setPromptFailures(3);
+  for (let i = 0; i < 3; i++) {
+    harness.emitEvent("session.execution.started", { sessionID: "ses_main" });
+    harness.emitEvent("session.execution.succeeded", { sessionID: "ses_main" });
+    await harness.wait(260);
+  }
+  const goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.promptFailures, 3);
+  assert.equal(goal.status, "paused");
+  assert.match(goal.stopReason, /continuation prompt failed 3 times/);
+  controller.dispose();
+});
+
+test("a successful continuation resets the persisted failure counter", async () => {
+  const { harness, controller } = await setup();
+  await harness.runCommand("fix tests");
+  harness.setPromptFailures(1);
+  harness.emitEvent("session.execution.started", { sessionID: "ses_main" });
+  harness.emitEvent("session.execution.succeeded", { sessionID: "ses_main" });
+  await harness.wait(260);
+  let goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.promptFailures, 1);
+  assert.equal(goal.status, "active");
+
+  harness.emitEvent("session.execution.started", { sessionID: "ses_main" });
+  harness.emitEvent("session.execution.succeeded", { sessionID: "ses_main" });
+  await harness.wait(260);
+  goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.promptFailures, 0);
+  controller.dispose();
+});

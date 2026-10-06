@@ -13,7 +13,7 @@ export function createHarness(input = {}) {
   const storageMap = new Map();
   const eventQueue = [];
   let eventWaiter = null;
-  const hooks = { context: [], prompt: [] };
+  const hooks = { context: [], prompt: [], compaction: [] };
   const toolAfterHooks = [];
   const commands = new Map();
   const tools = new Map();
@@ -25,6 +25,7 @@ export function createHarness(input = {}) {
   const sessionInfos = new Map(Object.entries(input.sessions ?? {}));
   const transcript = input.transcript ?? [];
   let generateResponse = input.generateResponse ?? { text: "APPROVE\nlooks good" };
+  let promptFailuresRemaining = 0;
 
   const defaultSession = (sessionID) => ({
     id: sessionID,
@@ -77,6 +78,10 @@ export function createHarness(input = {}) {
         removed.push(sessionID);
       },
       async prompt(promptInput) {
+        if (promptFailuresRemaining > 0) {
+          promptFailuresRemaining -= 1;
+          throw new Error("prompt rejected (test)");
+        }
         prompts.push(promptInput);
         return { id: `msg_${prompts.length}` };
       },
@@ -96,6 +101,7 @@ export function createHarness(input = {}) {
       async hook(name, callback) {
         if (name === "context") hooks.context.push(callback);
         else if (name === "prompt") hooks.prompt.push(callback);
+        else if (name === "compaction") hooks.compaction.push(callback);
         return { dispose() {} };
       },
     },
@@ -184,6 +190,14 @@ export function createHarness(input = {}) {
       const event = { sessionID, system };
       for (const hook of hooks.context) await hook(event);
       return system;
+    },
+    async fireCompaction(sessionID, system = []) {
+      const event = { sessionID, system };
+      for (const hook of hooks.compaction) await hook(event);
+      return system;
+    },
+    setPromptFailures(count) {
+      promptFailuresRemaining = count;
     },
     async runCommand(text, sessionID = "ses_main") {
       const command = commands.get("goal");

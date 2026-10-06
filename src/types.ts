@@ -110,6 +110,8 @@ export interface GoalRecord {
   status: GoalStatus;
   stopReason?: string;
   recovered?: boolean;
+  /** True after the user cleared a terminal goal; the TUI hides it. */
+  dismissed?: boolean;
   createdAt: string;
   updatedAt: string;
   activeSince?: string;

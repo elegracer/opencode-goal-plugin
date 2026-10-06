@@ -105,7 +105,7 @@ export class GoalController {
             return JSON.stringify({ present: false });
         const info = await this.sessionInfo(sessionID);
         const goal = await this.loadGoalForSession(sessionID, info);
-        if (!goal)
+        if (!goal || goal.dismissed)
             return JSON.stringify({ present: false });
         const now = nowIso();
         return JSON.stringify({
@@ -507,6 +507,8 @@ export class GoalController {
                 return;
             }
             case "session.retry.scheduled": {
+                if (!(await this.ownsSession(sessionID)))
+                    return;
                 this.clearFailureTimer(sessionID);
                 this.loop.noteRetryScheduled(sessionID);
                 return;
@@ -850,10 +852,14 @@ export class GoalController {
                     if (!current)
                         return current;
                     if (current.status === "complete" || current.status === "cancelled") {
-                        state.outcome = "already";
+                        // Already terminal: just hide it from the sidebar, keep history.
+                        current.dismissed = true;
+                        current.updatedAt = nowIso();
+                        state.outcome = "dismissed";
                         return current;
                     }
                     cancelGoal(current, "cleared by user", nowIso());
+                    current.dismissed = true;
                     state.outcome = "cleared";
                     return current;
                 });
@@ -861,8 +867,8 @@ export class GoalController {
                 this.candidates.clear(sessionID);
                 await this.reply(sessionID, state.outcome === "cleared"
                     ? "🧹 Goal cleared."
-                    : state.outcome === "already"
-                        ? `Goal is already ${updated?.status ?? "closed"}; nothing to clear.`
+                    : state.outcome === "dismissed"
+                        ? `🧹 Removed the ${updated?.status ?? "closed"} goal from the sidebar (history is still available via /goal history).`
                         : "No goal to clear.");
                 return;
             }

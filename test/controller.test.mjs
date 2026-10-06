@@ -186,9 +186,39 @@ test("clear archives the state and blocks new completion", async () => {
   await harness.runCommand("clear");
   const goal = await storeFor(harness).load("ses_main");
   assert.equal(goal.status, "cancelled");
+  assert.equal(goal.dismissed, true);
   assert.match(harness.synthetics.at(-1).text, /cleared/);
   await harness.runCommand("clear");
-  assert.match(harness.synthetics.at(-1).text, /already cancelled/);
+  assert.match(harness.synthetics.at(-1).text, /Removed the cancelled goal/);
+  controller.dispose();
+});
+
+test("clearing a completed goal dismisses it from the RPC snapshot", async () => {
+  const { harness, controller } = await setup();
+  await harness.runCommand("fix tests");
+  await harness.fireToolAfter({
+    tool: "shell",
+    id: "call_ok",
+    status: "completed",
+    sessionID: "ses_main",
+    result: { content: "42 passing" },
+  });
+  const completed = await harness.runTool("goal_update", {
+    action: "complete",
+    evidence: { candidateID: "call_ok", summary: "npm test passed 42/42, output in /work/log.txt" },
+  });
+  assert.match(completed.content, /completed/);
+  const registration = harness.rpcRegistrations[0];
+  let payload = JSON.parse((await registration.handlers.get({ sessionID: "ses_main" })).payload);
+  assert.equal(payload.present, true);
+  assert.equal(payload.status, "complete");
+
+  await harness.runCommand("clear");
+  payload = JSON.parse((await registration.handlers.get({ sessionID: "ses_main" })).payload);
+  assert.equal(payload.present, false);
+  const goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.status, "complete");
+  assert.equal(goal.dismissed, true);
   controller.dispose();
 });
 

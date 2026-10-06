@@ -159,7 +159,7 @@ export class GoalController implements GoalToolApiLike {
     if (!sessionID) return JSON.stringify({ present: false });
     const info = await this.sessionInfo(sessionID);
     const goal = await this.loadGoalForSession(sessionID, info);
-    if (!goal) return JSON.stringify({ present: false });
+    if (!goal || goal.dismissed) return JSON.stringify({ present: false });
     const now = nowIso();
     return JSON.stringify({
       present: true,
@@ -543,6 +543,7 @@ export class GoalController implements GoalToolApiLike {
         return;
       }
       case "session.retry.scheduled": {
+        if (!(await this.ownsSession(sessionID))) return;
         this.clearFailureTimer(sessionID);
         this.loop.noteRetryScheduled(sessionID);
         return;
@@ -884,14 +885,18 @@ export class GoalController implements GoalToolApiLike {
         return;
       }
       case "clear": {
-        const state: { outcome: "none" | "already" | "cleared" } = { outcome: "none" };
+        const state: { outcome: "none" | "cleared" | "dismissed" } = { outcome: "none" };
         const updated = await this.store.mutate(sessionID, (current) => {
           if (!current) return current;
           if (current.status === "complete" || current.status === "cancelled") {
-            state.outcome = "already";
+            // Already terminal: just hide it from the sidebar, keep history.
+            current.dismissed = true;
+            current.updatedAt = nowIso();
+            state.outcome = "dismissed";
             return current;
           }
           cancelGoal(current, "cleared by user", nowIso());
+          current.dismissed = true;
           state.outcome = "cleared";
           return current;
         });
@@ -901,8 +906,8 @@ export class GoalController implements GoalToolApiLike {
           sessionID,
           state.outcome === "cleared"
             ? "🧹 Goal cleared."
-            : state.outcome === "already"
-              ? `Goal is already ${updated?.status ?? "closed"}; nothing to clear.`
+            : state.outcome === "dismissed"
+              ? `🧹 Removed the ${updated?.status ?? "closed"} goal from the sidebar (history is still available via /goal history).`
               : "No goal to clear.",
         );
         return;

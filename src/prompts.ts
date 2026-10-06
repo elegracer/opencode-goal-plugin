@@ -4,7 +4,7 @@
  */
 
 import type { EvidenceCandidate, GoalRecord } from "./types.js";
-import { activeMsAt } from "./state.js";
+import { activeMsAt, taskSummary } from "./state.js";
 import { clampText, formatDuration, formatTokens, truncate } from "./util.js";
 
 export const INTERNAL_METADATA_KEY = "opencode.goal.internal";
@@ -56,6 +56,14 @@ export function buildSystemBlock(goal: GoalRecord, context: InjectionContext): s
     head.push("Recent checkpoints:");
     for (const checkpoint of goal.checkpoints.slice(-3)) {
       head.push(`- [${checkpoint.tool}] ${clampText(checkpoint.summary, 140)}`);
+    }
+  }
+
+  if (goal.tasks?.length) {
+    const summary = taskSummary(goal);
+    head.push(`Tasks (${summary.done}/${summary.total} done):`);
+    for (const task of goal.tasks.filter((item) => item.status !== "done").slice(0, 5)) {
+      head.push(`- [${task.status}] ${task.id} ${clampText(task.title, 120)}`);
     }
   }
 

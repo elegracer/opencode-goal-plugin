@@ -49,7 +49,19 @@ export class GoalStore {
             return undefined;
         if (typeof value.status !== "string" || !VALID_STATUSES.has(value.status))
             return undefined;
-        return value;
+        const record = value;
+        // Normalize fields added after v1 records were first persisted.
+        if (!Array.isArray(record.tasks))
+            record.tasks = [];
+        if (!Array.isArray(record.checkpoints))
+            record.checkpoints = [];
+        if (!Array.isArray(record.history))
+            record.history = [];
+        if (!Array.isArray(record.evidence))
+            record.evidence = [];
+        if (!Array.isArray(record.archive))
+            record.archive = [];
+        return record;
     }
     async load(sessionID) {
         const value = await this.storage.get(this.key(sessionID));

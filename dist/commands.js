@@ -1,7 +1,7 @@
 /**
  * `/goal` command parsing and human-readable status rendering (pure logic).
  */
-import { activeMsAt, statusLabel } from "./state.js";
+import { activeMsAt, statusLabel, taskSummary } from "./state.js";
 import { formatClock, formatDuration, formatTokens, parseAmount, truncate } from "./util.js";
 const VERB_ALIASES = {
     status: "status",
@@ -29,6 +29,8 @@ const VERB_ALIASES = {
     delete: "clear",
     history: "history",
     log: "history",
+    task: "task",
+    tasks: "task",
     help: "help",
 };
 export function tokenize(input) {
@@ -221,6 +223,13 @@ export function formatStatus(goal, candidates) {
         const last = goal.checkpoints[goal.checkpoints.length - 1];
         lines.push(`Latest checkpoint: [${formatClock(last.at)}] ${truncate(last.summary, 160)}`);
     }
+    if (goal.tasks?.length) {
+        const summary = taskSummary(goal);
+        lines.push(`Tasks: ${summary.done}/${summary.total} done${summary.doing ? `, ${summary.doing} in progress` : ""}`);
+        for (const task of goal.tasks.filter((item) => item.status !== "done").slice(0, 3)) {
+            lines.push(`- [${task.status}] ${task.id} ${truncate(task.title, 100)}`);
+        }
+    }
     if (candidates.length) {
         lines.push(`Evidence candidates: ${candidates
             .slice(-3)
@@ -254,6 +263,19 @@ export function formatHistory(goal) {
     }
     return lines.join("\n");
 }
+export function formatTasks(goal) {
+    if (!goal)
+        return "No goal is set for this session.";
+    if (!goal.tasks?.length) {
+        return "No tasks yet. Add one with /goal task add <title>.";
+    }
+    const summary = taskSummary(goal);
+    const lines = [`Tasks: ${summary.done}/${summary.total} done${summary.doing ? `, ${summary.doing} in progress` : ""}`];
+    for (const task of goal.tasks) {
+        lines.push(`- [${task.status}] ${task.id} ${truncate(task.title, 160)}`);
+    }
+    return lines.join("\n");
+}
 export function commandHelp(commandName) {
     return [
         `/${commandName} <objective> — set a goal and start working toward it`,
@@ -264,6 +286,9 @@ export function commandHelp(commandName) {
         `/${commandName} done <evidence> — complete with a checkable evidence summary`,
         `/${commandName} clear — archive and clear the current goal`,
         `/${commandName} history — lifecycle history and archive`,
+        `/${commandName} task add <title> — add a task`,
+        `/${commandName} task <ref> todo|doing|done — update a task (ref = id or number)`,
+        `/${commandName} task list — list tasks`,
         "",
         "Flags for set: --turns N --tokens N --minutes N --unbounded --criteria \"...\" --constraints \"...\" --verify evidence|model|agent",
     ].join("\n");

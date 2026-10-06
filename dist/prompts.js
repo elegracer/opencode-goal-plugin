@@ -2,7 +2,7 @@
  * Prompt text builders. Goal text is wrapped and explicitly labeled as user
  * task data so an objective containing instructions cannot elevate itself.
  */
-import { activeMsAt } from "./state.js";
+import { activeMsAt, taskSummary } from "./state.js";
 import { clampText, formatDuration, formatTokens, truncate } from "./util.js";
 export const INTERNAL_METADATA_KEY = "opencode.goal.internal";
 function remaining(goal) {
@@ -48,6 +48,13 @@ export function buildSystemBlock(goal, context) {
         head.push("Recent checkpoints:");
         for (const checkpoint of goal.checkpoints.slice(-3)) {
             head.push(`- [${checkpoint.tool}] ${clampText(checkpoint.summary, 140)}`);
+        }
+    }
+    if (goal.tasks?.length) {
+        const summary = taskSummary(goal);
+        head.push(`Tasks (${summary.done}/${summary.total} done):`);
+        for (const task of goal.tasks.filter((item) => item.status !== "done").slice(0, 5)) {
+            head.push(`- [${task.status}] ${task.id} ${clampText(task.title, 120)}`);
         }
     }
     if (goal.status === "active") {

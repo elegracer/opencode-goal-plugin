@@ -89,6 +89,14 @@ export interface GoalStall {
   lastOutputTokens: number;
 }
 
+export interface GoalTask {
+  id: string;
+  title: string;
+  status: "todo" | "doing" | "done";
+  at: string;
+  updatedAt: string;
+}
+
 export interface GoalRecord {
   v: 1;
   goalID: string;
@@ -116,6 +124,7 @@ export interface GoalRecord {
   /** Latest observed usage snapshot (persisted so restarts keep accounting). */
   lastUsage?: UsageSnapshot;
   stall: GoalStall;
+  tasks: GoalTask[];
   evidence: EvidenceRecord[];
   checkpoints: Checkpoint[];
   history: HistoryEntry[];

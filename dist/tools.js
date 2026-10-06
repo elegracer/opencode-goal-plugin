@@ -75,6 +75,41 @@ export function goalToolDefinitions(api) {
             },
         },
         {
+            name: "goal_add_task",
+            description: "Add a task to the active goal's task list so progress is visible and survives compaction. Use for multi-step goals.",
+            input: {
+                type: "object",
+                properties: { title: { type: "string", minLength: 1, description: "Short task title." } },
+                required: ["title"],
+                additionalProperties: false,
+            },
+            options: { codemode: false },
+            execute: async (input, context) => {
+                const value = input;
+                const result = await api.goalTaskAdd(context.sessionID, value.title);
+                return { content: result.message };
+            },
+        },
+        {
+            name: "goal_update_task",
+            description: "Update a goal task's status. `ref` is the task id (t1) or its 1-based position.",
+            input: {
+                type: "object",
+                properties: {
+                    ref: { type: "string", minLength: 1, description: "Task id or 1-based index." },
+                    status: { type: "string", enum: ["todo", "doing", "done"] },
+                },
+                required: ["ref", "status"],
+                additionalProperties: false,
+            },
+            options: { codemode: false },
+            execute: async (input, context) => {
+                const value = input;
+                const result = await api.goalTaskUpdate(context.sessionID, value.ref, value.status);
+                return { content: result.message };
+            },
+        },
+        {
             name: "goal_history",
             description: "Get the session goal lifecycle history and archived goals. Read-only.",
             input: { type: "object", properties: {}, additionalProperties: false },

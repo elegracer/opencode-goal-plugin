@@ -71,6 +71,7 @@ export function startGoal(previous, input) {
         used: { turns: 0, contextTokens: 0, burnTokens: 0, cost: 0 },
         base: input.baseUsage ? { ...input.baseUsage } : previous?.lastUsage ? { ...previous.lastUsage } : undefined,
         stall: { noToolTurns: 0, noProgressTurns: 0, lastOutputTokens: 0 },
+        tasks: [],
         evidence: [],
         checkpoints: [],
         history: [],
@@ -159,6 +160,57 @@ export function editGoal(goal, objective, at) {
     goal.objective = objective;
     goal.updatedAt = at;
     pushHistory(goal, "edited", from, objective);
+}
+const MAX_TASKS = 50;
+function canEditTasks(goal) {
+    return goal.status !== "complete" && goal.status !== "cancelled";
+}
+export function findTask(goal, ref) {
+    const trimmed = ref.trim();
+    if (!trimmed)
+        return undefined;
+    const byID = goal.tasks.find((task) => task.id === trimmed);
+    if (byID)
+        return byID;
+    const index = Number.parseInt(trimmed, 10);
+    if (Number.isInteger(index) && index >= 1 && index <= goal.tasks.length)
+        return goal.tasks[index - 1];
+    return undefined;
+}
+export function addTask(goal, title, at) {
+    if (!canEditTasks(goal))
+        return undefined;
+    const clean = title.trim();
+    if (!clean)
+        return undefined;
+    if (goal.tasks.length >= MAX_TASKS)
+        return undefined;
+    let counter = goal.tasks.length + 1;
+    while (goal.tasks.some((task) => task.id === `t${counter}`))
+        counter += 1;
+    const task = { id: `t${counter}`, title: clean, status: "todo", at, updatedAt: at };
+    goal.tasks.push(task);
+    goal.updatedAt = at;
+    pushHistory(goal, "task", goal.status, goal.status, `added ${task.id}: ${clean}`);
+    return task;
+}
+export function updateTask(goal, ref, status, at) {
+    if (!canEditTasks(goal))
+        return undefined;
+    const task = findTask(goal, ref);
+    if (!task)
+        return undefined;
+    task.status = status;
+    task.updatedAt = at;
+    goal.updatedAt = at;
+    pushHistory(goal, "task", goal.status, goal.status, `${task.id} ${status}: ${task.title}`);
+    return task;
+}
+export function taskSummary(goal) {
+    const tasks = goal.tasks ?? [];
+    const done = tasks.filter((task) => task.status === "done").length;
+    const doing = tasks.filter((task) => task.status === "doing").length;
+    return { total: tasks.length, done, doing };
 }
 function isProgressTool(tool) {
     return tool === "edit" || tool === "write" || tool === "patch";

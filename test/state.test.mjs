@@ -3,14 +3,18 @@ import assert from "node:assert/strict";
 import {
   accountUsage,
   activeMsAt,
+  addTask,
   cancelGoal,
   completeGoal,
+  findTask,
   limitGoal,
   pauseGoal,
   recordCheckpoint,
   resumeGoal,
   settleTurn,
   startGoal,
+  taskSummary,
+  updateTask,
 } from "../dist/state.js";
 
 const baseInput = {
@@ -212,4 +216,34 @@ test("completeGoal records evidence and stops the clock", () => {
   assert.equal(goal.status, "complete");
   assert.equal(goal.evidence.length, 1);
   assert.equal(goal.activeMs, 5_000);
+});
+
+test("task list helpers add, resolve by id or number, and update", () => {
+  const goal = startGoal(undefined, baseInput);
+  const t1 = addTask(goal, "write tests", "2026-01-01T00:00:01.000Z");
+  const t2 = addTask(goal, "ship it", "2026-01-01T00:00:02.000Z");
+  assert.equal(t1.id, "t1");
+  assert.equal(t2.id, "t2");
+  assert.equal(findTask(goal, "t1").title, "write tests");
+  assert.equal(findTask(goal, "2").title, "ship it");
+  assert.equal(findTask(goal, "t9"), undefined);
+  assert.equal(findTask(goal, ""), undefined);
+
+  updateTask(goal, "1", "doing", "2026-01-01T00:00:03.000Z");
+  updateTask(goal, "t2", "done", "2026-01-01T00:00:04.000Z");
+  assert.equal(findTask(goal, "t1").status, "doing");
+  assert.equal(findTask(goal, "t2").status, "done");
+  assert.deepEqual(taskSummary(goal), { total: 2, done: 1, doing: 1 });
+});
+
+test("task edits are rejected for closed goals and empty titles", () => {
+  const goal = startGoal(undefined, baseInput);
+  assert.equal(addTask(goal, "   ", "2026-01-01T00:00:01.000Z"), undefined);
+  completeGoal(
+    goal,
+    { at: "2026-01-01T00:00:05.000Z", candidateID: "c", tool: "shell", summary: "s", tier: "evidence", reason: "ok" },
+    "2026-01-01T00:00:05.000Z",
+  );
+  assert.equal(addTask(goal, "late", "2026-01-01T00:00:06.000Z"), undefined);
+  assert.equal(updateTask(goal, "t1", "done", "2026-01-01T00:00:06.000Z"), undefined);
 });

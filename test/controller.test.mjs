@@ -332,6 +332,35 @@ test("goal_set refuses to clobber an existing goal", async () => {
   controller.dispose();
 });
 
+test("task commands and tools manage the goal task list", async () => {
+  const { harness, controller } = await setup();
+  await harness.runCommand("fix tests");
+  await harness.runCommand("task add write tests");
+  let goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.tasks.length, 1);
+  assert.equal(goal.tasks[0].title, "write tests");
+
+  await harness.runCommand("task 1 doing");
+  goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.tasks[0].status, "doing");
+
+  const added = await harness.runTool("goal_add_task", { title: "ship it" });
+  assert.match(added.content, /Added task/);
+  const updated = await harness.runTool("goal_update_task", { ref: "2", status: "done" });
+  assert.match(updated.content, /done/);
+
+  const status = await harness.runTool("goal_get", {});
+  assert.match(status.content, /"taskSummary"/);
+
+  const system = await harness.fireContext("ses_main");
+  assert.match(system[0].text, /Tasks \(1\/2 done\)/);
+  assert.match(system[0].text, /write tests/);
+
+  await harness.runCommand("task list");
+  assert.match(harness.synthetics.at(-1).text, /Tasks: 1\/2 done/);
+  controller.dispose();
+});
+
 test("goal_clear tool defers to the user", async () => {
   const { harness, controller } = await setup();
   await harness.runCommand("fix tests");

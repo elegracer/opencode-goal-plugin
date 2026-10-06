@@ -21,7 +21,7 @@ import type {
   SessionInfo,
   ToolCallContext,
 } from "./api.js";
-import { commandHelp, formatHistory, formatStatus, mergeLimits, parseGoalCommand } from "./commands.js";
+import { commandHelp, formatHistory, formatStatus, formatTasks, mergeLimits, parseGoalCommand } from "./commands.js";
 import { EvidenceTracker, evidenceQuality, isProgressTool, summarizeToolResult } from "./evidence.js";
 import { ContinuationLoop } from "./loop.js";
 import { resolveOptions, type ResolvedOptions } from "./options.js";
@@ -30,10 +30,12 @@ import { GoalStore } from "./store.js";
 import {
   accountUsage,
   activeMsAt,
+  addTask,
   blockGoal,
   cancelGoal,
   completeGoal,
   editGoal,
+  findTask,
   limitGoal,
   pauseGoal,
   pushHistory,
@@ -42,6 +44,8 @@ import {
   settleTurn,
   startGoal,
   statusLabel,
+  taskSummary,
+  updateTask,
 } from "./state.js";
 import { goalToolDefinitions, type GoalSetInput, type GoalUpdateInput } from "./tools.js";
 import type { EvidenceCandidate, EvidenceRecord, GoalRecord, GoalStatus, UsageSnapshot } from "./types.js";
@@ -646,6 +650,10 @@ export class GoalController implements GoalToolApiLike {
         await this.reply(sessionID, formatHistory(goal));
         return;
       }
+      case "task": {
+        await this.handleTaskCommand(sessionID, parsed.text);
+        return;
+      }
       case "set": {
         await this.startGoalFromCommand(sessionID, parsed.text, parsed.flags, input);
         return;
@@ -735,6 +743,61 @@ export class GoalController implements GoalToolApiLike {
         await this.reply(sessionID, commandHelp(this.options.commandName));
         return;
     }
+  }
+
+  private async handleTaskCommand(sessionID: string, text: string): Promise<void> {
+    const rest = text.trim();
+    const statuses = new Set(["todo", "doing", "done"]);
+
+    if (!rest || rest.toLowerCase() === "list") {
+      const goal = await this.store.load(sessionID);
+      await this.reply(sessionID, formatTasks(goal));
+      return;
+    }
+
+    const parts = rest.split(/\s+/);
+    const head = parts[0].toLowerCase();
+
+    if (head === "add") {
+      const title = rest.slice(rest.indexOf("add") + 3).trim();
+      if (!title) {
+        await this.reply(sessionID, "Usage: /goal task add <title>");
+        return;
+      }
+      const result: { task?: string } = {};
+      await this.store.mutate(sessionID, (current) => {
+        if (current) {
+          const task = addTask(current, title, nowIso());
+          if (task) result.task = `${task.id}: ${task.title}`;
+        }
+        return current;
+      });
+      await this.reply(sessionID, result.task ? `Added ${result.task}` : "No editable goal to add tasks to.");
+      return;
+    }
+
+    let ref: string | undefined;
+    let status: "todo" | "doing" | "done" | undefined;
+    if (statuses.has(head) && parts[1]) {
+      status = head as "todo" | "doing" | "done";
+      ref = parts[1];
+    } else if (parts[1] && statuses.has(parts[1].toLowerCase())) {
+      ref = head;
+      status = parts[1].toLowerCase() as "todo" | "doing" | "done";
+    }
+    if (!ref || !status) {
+      await this.reply(sessionID, "Usage: /goal task <ref> todo|doing|done  (ref = id or number)");
+      return;
+    }
+    const result: { message?: string } = {};
+    await this.store.mutate(sessionID, (current) => {
+      if (current) {
+        const task = updateTask(current, ref!, status!, nowIso());
+        result.message = task ? `${task.id} → ${task.status}: ${task.title}` : `Task "${ref}" not found.`;
+      }
+      return current;
+    });
+    await this.reply(sessionID, result.message ?? "No goal to update.");
   }
 
   private async startGoalFromCommand(
@@ -836,6 +899,8 @@ export class GoalController implements GoalToolApiLike {
           limits: goal.unbounded ? { unbounded: true } : goal.limits,
           used: goal.used,
           activeMs: activeMsAt(goal, now),
+          tasks: goal.tasks,
+          taskSummary: taskSummary(goal),
           checkpoints: goal.checkpoints.slice(-5),
           history: goal.history.slice(-10),
           archive: goal.archive.map((archived) => ({
@@ -952,6 +1017,46 @@ export class GoalController implements GoalToolApiLike {
     };
   }
 
+  async goalTaskAdd(sessionID: string, title: string): Promise<{ ok: boolean; message: string }> {
+    const root = await this.rootSession(sessionID);
+    if (root !== sessionID) return { ok: false, message: "Subagents cannot modify the goal task list." };
+    const clean = (title ?? "").trim();
+    if (!clean) return { ok: false, message: "A task title is required." };
+    const result: { added?: string; reason?: string } = {};
+    await this.store.mutate(sessionID, (current) => {
+      if (!current) return current;
+      const task = addTask(current, clean, nowIso());
+      if (task) result.added = `${task.id}: ${task.title}`;
+      else result.reason = "This goal is closed or the task list is full.";
+      return current;
+    });
+    return result.added
+      ? { ok: true, message: `Added task ${result.added}` }
+      : { ok: false, message: result.reason ?? "No goal to add tasks to." };
+  }
+
+  async goalTaskUpdate(
+    sessionID: string,
+    ref: string,
+    status: "todo" | "doing" | "done",
+  ): Promise<{ ok: boolean; message: string }> {
+    const root = await this.rootSession(sessionID);
+    if (root !== sessionID) return { ok: false, message: "Subagents cannot modify the goal task list." };
+    if (status !== "todo" && status !== "doing" && status !== "done") {
+      return { ok: false, message: "status must be todo, doing, or done." };
+    }
+    const result: { message?: string } = {};
+    await this.store.mutate(sessionID, (current) => {
+      if (!current) return current;
+      const task = updateTask(current, ref, status, nowIso());
+      result.message = task ? `Task ${task.id} → ${task.status}: ${task.title}` : `Task "${ref}" not found.`;
+      return current;
+    });
+    return result.message
+      ? { ok: !result.message.includes("not found"), message: result.message }
+      : { ok: false, message: "No goal to update." };
+  }
+
   // ── Completion with verification ─────────────────────────────────────────
 
   private async completeWithEvidence(
@@ -1047,4 +1152,6 @@ interface GoalToolApiLike {
   goalSet(sessionID: string, input: GoalSetInput): Promise<{ ok: boolean; message: string }>;
   goalUpdate(sessionID: string, input: GoalUpdateInput): Promise<{ ok: boolean; message: string }>;
   goalClear(sessionID: string): Promise<{ ok: boolean; message: string }>;
+  goalTaskAdd(sessionID: string, title: string): Promise<{ ok: boolean; message: string }>;
+  goalTaskUpdate(sessionID: string, ref: string, status: "todo" | "doing" | "done"): Promise<{ ok: boolean; message: string }>;
 }

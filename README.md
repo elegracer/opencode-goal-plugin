@@ -82,6 +82,9 @@ To force a clean re-resolve on this build: remove `~/.cache/opencode/npm/git-ope
 /goal done <evidence>             complete with a checkable evidence summary
 /goal clear                       archive and clear the current goal
 /goal history                     lifecycle history and archive
+/goal task add <title>            add a task to the goal's task list
+/goal task <ref> todo|doing|done  update a task (ref = id or number)
+/goal task list                   list tasks
 /goal help                        command help
 ```
 
@@ -111,9 +114,11 @@ The model gets a small tool surface, all persisted and audited:
 
 | Tool | Purpose |
 |---|---|
-| `goal_get` | status, budget usage, checkpoints, history, exact evidence candidate IDs |
+| `goal_get` | status, budget usage, tasks, checkpoints, history, exact evidence candidate IDs |
 | `goal_set` | create a goal (only when the user explicitly asks) |
 | `goal_update` | `pause` / `resume` / `block` / `complete` with structured evidence |
+| `goal_add_task` | add a task to the goal's task list |
+| `goal_update_task` | set a task `todo` / `doing` / `done` (by id or number) |
 | `goal_history` | lifecycle history and archive |
 | `goal_clear` | intentionally refuses: only the user's `/goal clear` may clear a goal |
 

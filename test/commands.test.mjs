@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatHistory, formatStatus, mergeLimits, parseGoalCommand } from "../dist/commands.js";
+import { formatHistory, formatStatus, formatTasks, mergeLimits, parseGoalCommand } from "../dist/commands.js";
 
 test("bare text becomes a set objective", () => {
   const parsed = parseGoalCommand("fix the failing tests");
@@ -40,6 +40,32 @@ test("unknown flags and bad values are rejected", () => {
 test("mergeLimits applies flag overrides", () => {
   const limits = mergeLimits({ maxTurns: 10, maxTokens: 1000, maxDurationMs: 5000 }, { maxTurns: 3 });
   assert.deepEqual(limits, { maxTurns: 3, maxTokens: 1000, maxDurationMs: 5000 });
+});
+
+test("task verbs parse in both orders", () => {
+  const add = parseGoalCommand("task add write the docs");
+  assert.equal(add.verb, "task");
+  assert.equal(add.text, "add write the docs");
+  const a = parseGoalCommand("task 1 done");
+  assert.equal(a.verb, "task");
+  assert.equal(a.text, "1 done");
+  const b = parseGoalCommand("task done 2");
+  assert.equal(b.text, "done 2");
+  assert.equal(parseGoalCommand("tasks").verb, "task");
+});
+
+test("formatTasks lists tasks and progress", () => {
+  assert.match(formatTasks(undefined), /No goal/);
+  const goal = {
+    tasks: [
+      { id: "t1", title: "write tests", status: "doing", at: "t", updatedAt: "t" },
+      { id: "t2", title: "ship it", status: "done", at: "t", updatedAt: "t" },
+    ],
+  };
+  const text = formatTasks(goal);
+  assert.match(text, /1\/2 done/);
+  assert.match(text, /t1/);
+  assert.match(text, /ship it/);
 });
 
 test("formatStatus reports no-goal and goal summaries", () => {

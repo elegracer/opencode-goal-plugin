@@ -80,16 +80,49 @@ test("pause and resume manage the active clock", () => {
   assert.equal(activeMsAt(goal, "2026-01-01T00:01:05.000Z"), 15_000);
 });
 
-test("usage accounting is goal-scoped and cumulative", () => {
+test("usage accounting is goal-scoped and per-call for context", () => {
   const goal = startGoal(undefined, baseInput);
-  accountUsage(goal, { input: 100, output: 20, reasoning: 5, cacheRead: 30, cacheWrite: 1, cost: 0.5 });
-  assert.deepEqual(goal.base, { input: 100, output: 20, reasoning: 5, cacheRead: 30, cacheWrite: 1, cost: 0.5 });
+  const first = { input: 100, output: 20, reasoning: 5, cacheRead: 30, cacheWrite: 1, cost: 0.5 };
+  accountUsage(goal, first);
+  assert.deepEqual(goal.base, first);
   assert.equal(goal.used.burnTokens, 0);
-  assert.equal(goal.used.contextTokens, 125);
-  accountUsage(goal, { input: 300, output: 60, reasoning: 10, cacheRead: 80, cacheWrite: 2, cost: 1.5 });
-  assert.equal(goal.used.burnTokens, 300 - 100 + (60 - 20) + (10 - 5) + (80 - 30) + (2 - 1));
-  assert.equal(goal.used.contextTokens, 370);
+  assert.equal(goal.used.contextTokens, 0); // no per-call delta on the baseline event
+
+  const second = { input: 300, output: 60, reasoning: 10, cacheRead: 80, cacheWrite: 2, cost: 1.5 };
+  const call = { input: 200, output: 40, reasoning: 5, cacheRead: 50, cacheWrite: 1, cost: 1.0 };
+  accountUsage(goal, second, call);
+  assert.equal(goal.used.contextTokens, 200 + 50 + 40 + 5);
+  assert.equal(goal.used.burnTokens, 200 + 40 + 5 + 50 + 1);
   assert.equal(Math.round(goal.used.cost * 100), 100);
+});
+
+test("cumulative session totals never trip the context cap by themselves", () => {
+  const goal = startGoal(undefined, baseInput);
+  // A long session: cumulative totals are far beyond maxTokens (1000).
+  accountUsage(goal, { input: 7_000_000, output: 100_000, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 5 });
+  const verdict = settleTurn(goal, {
+    wasGoalTurn: true,
+    hadToolCall: true,
+    outputDelta: 200,
+    at: "2026-01-01T00:00:01.000Z",
+    stallOutputTokens: 50,
+  });
+  assert.equal(verdict, undefined);
+
+  // But one call whose context window exceeds the cap does trip it.
+  accountUsage(
+    goal,
+    { input: 7_001_000, output: 100_100, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 5.1 },
+    { input: 1_000, output: 100, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0.1 },
+  );
+  const tripped = settleTurn(goal, {
+    wasGoalTurn: true,
+    hadToolCall: true,
+    outputDelta: 200,
+    at: "2026-01-01T00:00:02.000Z",
+    stallOutputTokens: 50,
+  });
+  assert.equal(tripped?.status, "usage_limited");
 });
 
 test("turn settlement trips the turn cap", () => {

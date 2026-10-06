@@ -238,6 +238,38 @@ test("retry grace prevents a transient failure from pausing", async () => {
   controller.dispose();
 });
 
+test("long-session cumulative usage does not trip the token cap", async () => {
+  const { harness, controller } = await setup();
+  await harness.runCommand("fix tests --tokens 100k");
+  // Baseline snapshot: cumulative session totals already far above the cap.
+  harness.emitEvent("session.usage.updated", {
+    sessionID: "ses_main",
+    tokens: { input: 7_000_000, output: 100_000, reasoning: 0, cache: { read: 0, write: 0 } },
+    cost: 5,
+  });
+  await harness.wait(60);
+  let goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.used.contextTokens, 0);
+
+  // Next call: 50k input + 2k cached input + 300 output = 52.3k context.
+  harness.emitEvent("session.usage.updated", {
+    sessionID: "ses_main",
+    tokens: { input: 7_050_000, output: 100_300, reasoning: 0, cache: { read: 2_000, write: 0 } },
+    cost: 5.1,
+  });
+  await harness.wait(60);
+  goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.used.contextTokens, 52_300);
+
+  harness.emitEvent("session.execution.started", { sessionID: "ses_main" });
+  harness.emitEvent("session.execution.succeeded", { sessionID: "ses_main" });
+  await harness.wait(250);
+  goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.used.turns, 1);
+  controller.dispose();
+});
+
 test("user interrupt pauses the goal", async () => {
   const { harness, controller } = await setup();
   await harness.runCommand("fix tests");

@@ -455,20 +455,34 @@ export class GoalController {
             cacheWrite: asNumber(cache?.write) ?? 0,
             cost: asNumber(event.data?.cost) ?? 0,
         };
-        const state = this.usageState(sessionID);
-        if (state.snapshot) {
-            state.pendingOutput += Math.max(0, snapshot.output - state.snapshot.output);
-        }
-        state.snapshot = snapshot;
         const root = await this.rootSession(sessionID);
         if (root !== sessionID)
             return;
         const goal = await this.store.load(sessionID);
+        const state = this.usageState(sessionID);
+        // `usage.updated` carries cumulative session totals. Diff against the
+        // previous snapshot (in memory, or the persisted one after a restart) to
+        // recover the latest call's own usage, which is the real context size.
+        const previous = state.snapshot ?? goal?.lastUsage;
+        const call = previous
+            ? {
+                input: Math.max(0, snapshot.input - previous.input),
+                output: Math.max(0, snapshot.output - previous.output),
+                reasoning: Math.max(0, snapshot.reasoning - previous.reasoning),
+                cacheRead: Math.max(0, snapshot.cacheRead - previous.cacheRead),
+                cacheWrite: Math.max(0, snapshot.cacheWrite - previous.cacheWrite),
+                cost: Math.max(0, snapshot.cost - previous.cost),
+            }
+            : undefined;
+        if (previous) {
+            state.pendingOutput += Math.max(0, snapshot.output - previous.output);
+        }
+        state.snapshot = snapshot;
         if (!goal)
             return;
         await this.store.mutate(sessionID, (current) => {
             if (current)
-                accountUsage(current, snapshot);
+                accountUsage(current, snapshot, call);
             return current;
         });
     }

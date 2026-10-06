@@ -17,7 +17,7 @@ export const TERMINAL_STATUSES: ReadonlySet<GoalStatus> = new Set(["complete", "
 
 export interface GoalLimits {
   maxTurns?: number;
-  /** Maximum context window tokens (input + output + reasoning of the latest call). */
+  /** Maximum context window tokens of a single model call (input + cached input + output + reasoning). */
   maxTokens?: number;
   maxDurationMs?: number;
   /** Consecutive goal continuation turns with no tool call before stalling. */

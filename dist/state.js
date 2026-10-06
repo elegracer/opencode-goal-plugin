@@ -175,14 +175,23 @@ export function recordCheckpoint(goal, checkpoint) {
     goal.updatedAt = checkpoint.at;
     pushHistory(goal, "checkpoint", goal.status, goal.status, checkpoint.summary);
 }
-/** Goal-scoped usage accounting from a cumulative session usage snapshot. */
-export function accountUsage(goal, snapshot) {
+/** Goal-scoped usage accounting.
+ *
+ * `snapshot` is the session's cumulative usage (what `session.usage.updated`
+ * reports). The optional `call` argument is the per-call delta between this
+ * snapshot and the previous one; only that delta represents the actual context
+ * window of the latest model call, which is what `maxTokens` compares against.
+ * Using the cumulative snapshot here would trip the cap instantly on any long
+ * session (found live on a 7.6M-token session).
+ */
+export function accountUsage(goal, snapshot, call) {
     if (!goal.base) {
         // Baseline unknown (plugin started mid-session): start counting from now.
         goal.base = { ...snapshot };
     }
     goal.lastUsage = { ...snapshot };
-    goal.used.contextTokens = snapshot.input + snapshot.output + snapshot.reasoning;
+    const callTokens = call ? call.input + call.cacheRead + call.output + call.reasoning : 0;
+    goal.used.contextTokens = Math.max(0, callTokens);
     goal.used.burnTokens = Math.max(0, snapshot.input +
         snapshot.output +
         snapshot.reasoning +

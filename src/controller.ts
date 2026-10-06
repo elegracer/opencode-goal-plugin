@@ -155,6 +155,20 @@ export class GoalController implements GoalToolApiLike {
     return current;
   }
 
+  /** Fallback verifier model from the host's default selection, when available. */
+  private async defaultModel(): Promise<{ providerID: string; id: string; variant?: string } | undefined> {
+    try {
+      const result = await this.ctx.model?.default?.({ location: { directory: this.ctx.location.directory } });
+      const info = result?.data;
+      if (info && typeof info.providerID === "string" && typeof info.id === "string") {
+        return { providerID: info.providerID, id: info.id, ...(typeof info.variant === "string" ? { variant: info.variant } : {}) };
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async reply(sessionID: string, text: string): Promise<void> {
     try {
       // Synthetic messages are delivered to the model, not rendered for the
@@ -971,13 +985,14 @@ export class GoalController implements GoalToolApiLike {
       model && typeof model.providerID === "string" && typeof model.id === "string"
         ? { providerID: model.providerID, id: model.id, ...(typeof model.variant === "string" ? { variant: model.variant } : {}) }
         : undefined;
+    const explicitVerifier = this.options.verifierModel;
+    const verifierModel = explicitVerifier ?? sessionModel ?? (await this.defaultModel());
 
     const decision = await verifyCompletion(
       this.ctx,
       goal.verification ?? this.options.verification,
-      this.options.verifierModel,
       this.options.verifierTimeoutMs,
-      { goal, candidate, summary, transcript, sessionModel },
+      { goal, candidate, summary, transcript, verifierModel, verifierExplicit: Boolean(explicitVerifier) },
     );
 
     if (!decision.approved) {

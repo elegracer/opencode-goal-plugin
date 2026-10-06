@@ -22,7 +22,10 @@ export interface VerifyInput {
   candidate: EvidenceCandidate;
   summary: string;
   transcript: string;
-  sessionModel?: { providerID: string; id: string; variant?: string };
+  /** Already resolved verifier model (explicit option, session model, or host default). */
+  verifierModel?: { providerID: string; id: string; variant?: string };
+  /** True when the user explicitly configured `verifierModel`. */
+  verifierExplicit: boolean;
 }
 
 export interface VerifyDecision {
@@ -78,7 +81,6 @@ function extractMessageText(message: unknown): string {
 export async function verifyCompletion(
   ctx: PluginContext,
   verification: "evidence" | "model" | "agent",
-  verifierModel: { providerID: string; id: string; variant?: string } | undefined,
   verifierTimeoutMs: number,
   input: VerifyInput,
 ): Promise<VerifyDecision> {
@@ -87,7 +89,7 @@ export async function verifyCompletion(
   }
 
   if (verification === "model") {
-    const model = verifierModel ?? input.sessionModel;
+    const model = input.verifierModel;
     if (!model) {
       // No model available to adjudicate: accept the evidence gate, but make
       // the degradation visible in the audit trail.
@@ -102,7 +104,17 @@ export async function verifyCompletion(
       }
       return { approved: verdict.approved, tier: "model", reason: verdict.reason };
     } catch (error) {
-      return { approved: false, tier: "model", reason: `verifier failed: ${errorText(error)}` };
+      if (input.verifierExplicit) {
+        return { approved: false, tier: "model", reason: `verifier failed: ${errorText(error)}` };
+      }
+      // Implicit verifier (session or host default model): a host restriction
+      // such as a free-tier limit must not wedge the goal. Degrade to the
+      // evidence gate and record the degradation.
+      return {
+        approved: true,
+        tier: "evidence (verifier unavailable)",
+        reason: `verifier call failed: ${errorText(error)}`,
+      };
     }
   }
 

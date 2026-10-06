@@ -54,12 +54,12 @@ function extractMessageText(message) {
         .join("\n");
     return [direct, contentText, partsText].filter(Boolean).join("\n");
 }
-export async function verifyCompletion(ctx, verification, verifierModel, verifierTimeoutMs, input) {
+export async function verifyCompletion(ctx, verification, verifierTimeoutMs, input) {
     if (verification === "evidence") {
         return { approved: true, tier: "evidence", reason: "evidence accepted" };
     }
     if (verification === "model") {
-        const model = verifierModel ?? input.sessionModel;
+        const model = input.verifierModel;
         if (!model) {
             // No model available to adjudicate: accept the evidence gate, but make
             // the degradation visible in the audit trail.
@@ -75,7 +75,17 @@ export async function verifyCompletion(ctx, verification, verifierModel, verifie
             return { approved: verdict.approved, tier: "model", reason: verdict.reason };
         }
         catch (error) {
-            return { approved: false, tier: "model", reason: `verifier failed: ${errorText(error)}` };
+            if (input.verifierExplicit) {
+                return { approved: false, tier: "model", reason: `verifier failed: ${errorText(error)}` };
+            }
+            // Implicit verifier (session or host default model): a host restriction
+            // such as a free-tier limit must not wedge the goal. Degrade to the
+            // evidence gate and record the degradation.
+            return {
+                approved: true,
+                tier: "evidence (verifier unavailable)",
+                reason: `verifier call failed: ${errorText(error)}`,
+            };
         }
     }
     // Agent tier: an independent child session inspects the workspace.

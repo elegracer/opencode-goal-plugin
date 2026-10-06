@@ -113,6 +113,20 @@ export class GoalController {
         }
         return current;
     }
+    /** Fallback verifier model from the host's default selection, when available. */
+    async defaultModel() {
+        try {
+            const result = await this.ctx.model?.default?.({ location: { directory: this.ctx.location.directory } });
+            const info = result?.data;
+            if (info && typeof info.providerID === "string" && typeof info.id === "string") {
+                return { providerID: info.providerID, id: info.id, ...(typeof info.variant === "string" ? { variant: info.variant } : {}) };
+            }
+            return undefined;
+        }
+        catch {
+            return undefined;
+        }
+    }
     async reply(sessionID, text) {
         try {
             // Synthetic messages are delivered to the model, not rendered for the
@@ -910,7 +924,9 @@ export class GoalController {
         const sessionModel = model && typeof model.providerID === "string" && typeof model.id === "string"
             ? { providerID: model.providerID, id: model.id, ...(typeof model.variant === "string" ? { variant: model.variant } : {}) }
             : undefined;
-        const decision = await verifyCompletion(this.ctx, goal.verification ?? this.options.verification, this.options.verifierModel, this.options.verifierTimeoutMs, { goal, candidate, summary, transcript, sessionModel });
+        const explicitVerifier = this.options.verifierModel;
+        const verifierModel = explicitVerifier ?? sessionModel ?? (await this.defaultModel());
+        const decision = await verifyCompletion(this.ctx, goal.verification ?? this.options.verification, this.options.verifierTimeoutMs, { goal, candidate, summary, transcript, verifierModel, verifierExplicit: Boolean(explicitVerifier) });
         if (!decision.approved) {
             await this.mutateActive(sessionID, (current) => {
                 pauseGoal(current, `completion rejected (${decision.tier}): ${decision.reason}`, nowIso());

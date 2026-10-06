@@ -114,7 +114,7 @@ The model gets a small tool surface, all persisted and audited:
 3. **Budget accounting** — token/cost usage comes from `session.usage.updated` (accurate, not estimated). Goals count turns, latest context tokens, cumulative burn, and wall-clock active time. Default caps: 10 turns / 100k context tokens / 30 minutes; `--unbounded` opts out. When a cap trips, the goal becomes `budget_limited` / `usage_limited` / `stalled` and one wrap-up prompt asks for a summary.
 4. **Evidence-gated completion** — every successful tool call is recorded as an evidence candidate keyed by its real call ID. `goal_update complete` must reference one of those exact IDs with a specific summary. Then:
    - `verification: "evidence"` — structural gate only;
-   - `verification: "model"` (default) — one independent, tool-less model call (`ctx.generate.text`) adjudicates; unparsable output or errors reject;
+   - `verification: "model"` (default) — one independent, tool-less model call (`ctx.generate.text`) adjudicates. The verifier model is resolved in order: explicit `verifierModel` option → the session's selected model → the host's default model. An unparsable verdict always rejects; a verifier *call* failure with an explicit `verifierModel` rejects (fail-closed), while an implicit verifier (session/host model) that cannot run — for example OpenCode's free tier, which refuses `generate` calls — degrades to the evidence gate and records the tier as `evidence (verifier unavailable)`;
    - `verification: "agent"` — a bounded child session inspects the workspace with tools and reports `VERDICT: APPROVED|REJECTED`.
    A rejected completion pauses the goal with the reason; it is never silently completed.
 5. **Persistence and recovery** — goal state lives in host plugin storage (`ctx.storage`) per project/location/session. On startup, any goal still `active` is downgraded to `paused (recovered)` so unattended continuation never resumes blindly; `/goal resume` continues it.
@@ -133,7 +133,7 @@ The model gets a small tool surface, all persisted and audited:
 | `noProgressTurns` | `0` (off) | consecutive low-output turns before `stalled` |
 | `stallOutputTokens` | `50` | output-token floor for the low-output check |
 | `verification` | `"model"` | `evidence` / `model` / `agent` |
-| `verifierModel` | session model | `"provider/model"` or `{ providerID, id, variant? }` |
+| `verifierModel` | session / host default model | `"provider/model"` or `{ providerID, id, variant? }`; when set, verifier failures are fail-closed |
 | `verifierTimeoutMs` | `300000` | verification timeout (fail-closed) |
 | `onUserMessage` | `"pause"` | `pause` or `continue` when the user writes mid-goal |
 | `wrapUpOnLimit` | `true` | send one final summary prompt when a cap trips |

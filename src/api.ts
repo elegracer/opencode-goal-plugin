@@ -191,6 +191,12 @@ export interface PluginContext {
       prompt: string
     }) => Promise<{ text?: string }>
   }
+  /** Optional: hosts that expose the default model selection. */
+  readonly model?: {
+    default: (input?: { location?: { directory?: string } }) => Promise<{
+      data?: { id?: string; providerID?: string; variant?: string } | null
+    }>
+  }
 }
 
 export interface PluginDefinition {

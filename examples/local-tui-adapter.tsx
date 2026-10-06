@@ -157,6 +157,12 @@ function GoalSidebar(props: { context: any; sessionID: string }) {
 export default {
   id: "opencode-goal.local-tui",
   setup(context: any) {
+    // The host can initialize a discovered plugin more than once in a client
+    // process; register the slot only once so the widget is not duplicated.
+    const globalKey = "__opencodeGoalTuiClaimed";
+    const scope = globalThis as Record<string, unknown>;
+    if (scope[globalKey]) return;
+    scope[globalKey] = true;
     let release: (() => void) | undefined;
     try {
       release = context?.ui?.slot?.({
@@ -164,9 +170,11 @@ export default {
         render: ({ sessionID }: { sessionID: string }) => <GoalSidebar context={context} sessionID={sessionID} />,
       });
     } catch {
+      scope[globalKey] = false;
       return;
     }
     return () => {
+      scope[globalKey] = false;
       try {
         release?.();
       } catch {

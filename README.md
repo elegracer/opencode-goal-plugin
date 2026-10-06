@@ -83,7 +83,7 @@ To force a clean re-resolve on this build: remove `~/.cache/opencode/npm/git-ope
 /goal edit <objective>            revise the objective in place
 /goal block <reason>              record a specific blocker
 /goal done <evidence>             complete with a checkable evidence summary
-/goal clear                       archive and clear the current goal
+/goal clear                       clear the current goal (hides the sidebar card; completed goals hide too, history kept)
 /goal history                     lifecycle history and archive
 /goal task add <title>            add a task to the goal's task list
 /goal task <ref> todo|doing|done  update a task (ref = id or number)

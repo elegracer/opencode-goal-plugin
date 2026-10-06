@@ -58,10 +58,8 @@ test("a continuation turn is marked until its boundary settles", async () => {
   await loop.schedule("s");
   await new Promise((resolve) => setTimeout(resolve, 150));
   loop.noteExecutionStarted("s");
-  loop.noteToolCall("s");
   const boundary = loop.noteBoundary("s", "evt_2", "execution");
   assert.equal(boundary.wasGoalTurn, true);
-  assert.equal(boundary.hadToolCall, true);
   loop.dispose();
 });
 

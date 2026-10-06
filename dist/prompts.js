@@ -2,30 +2,12 @@
  * Prompt text builders. Goal text is wrapped and explicitly labeled as user
  * task data so an objective containing instructions cannot elevate itself.
  */
-import { activeMsAt, taskSummary } from "./state.js";
+import { taskSummary } from "./state.js";
 import { clampText, formatDuration, formatTokens, truncate } from "./util.js";
+import { activeMsAt } from "./state.js";
 export const INTERNAL_METADATA_KEY = "opencode.goal.internal";
-function remaining(goal) {
-    const parts = [];
-    if (!goal.unbounded && goal.limits.maxTurns !== undefined) {
-        parts.push(`turns ${goal.used.turns}/${goal.limits.maxTurns}`);
-    }
-    else {
-        parts.push(`turns ${goal.used.turns}`);
-    }
-    if (!goal.unbounded && goal.limits.maxTokens !== undefined) {
-        parts.push(`context ${formatTokens(goal.used.contextTokens)}/${formatTokens(goal.limits.maxTokens)}`);
-    }
-    else {
-        parts.push(`context ${formatTokens(goal.used.contextTokens)}`);
-    }
-    if (!goal.unbounded && goal.limits.maxDurationMs !== undefined) {
-        parts.push(`elapsed ${formatDuration(activeMsAt(goal, new Date().toISOString()))}/${formatDuration(goal.limits.maxDurationMs)}`);
-    }
-    else {
-        parts.push(`elapsed ${formatDuration(activeMsAt(goal, new Date().toISOString()))}`);
-    }
-    return parts.join(" · ");
+function usageLine(goal) {
+    return `turns ${goal.used.turns} · context ${formatTokens(goal.used.contextTokens)} · elapsed ${formatDuration(activeMsAt(goal, new Date().toISOString()))}`;
 }
 export function buildSystemBlock(goal, context) {
     if (goal.status === "complete" || goal.status === "cancelled")
@@ -41,7 +23,7 @@ export function buildSystemBlock(goal, context) {
     if (goal.constraints)
         head.push(`Constraints / non-goals: ${goal.constraints}`);
     head.push(`Status: ${goal.status}${goal.stopReason ? ` (${goal.stopReason})` : ""}`);
-    head.push(`Budget: ${remaining(goal)}`);
+    head.push(`Usage so far: ${usageLine(goal)}`);
     if (context.delegated)
         head.push("Note: this is delegated work; you are a child session working for the goal above.");
     if (goal.checkpoints.length) {
@@ -84,11 +66,6 @@ export function continuationText(goal) {
         "End this turn with either progress or a goal_update (complete with evidence / block with a blocker). " +
         `Goal: ${truncate(goal.objective, 200)}`);
 }
-export function wrapUpText(goal) {
-    return ("The goal execution budget has been reached or the goal was stopped. Do not start new work. " +
-        "In this final turn, summarize: what was completed, what remains, and the concrete next step for the user. " +
-        `Goal: ${truncate(goal.objective, 200)}`);
-}
 export function completionReviewPrompt(input) {
     const { goal, candidate, summary, transcript } = input;
     return [
@@ -107,26 +84,6 @@ export function completionReviewPrompt(input) {
         transcript || "(no transcript available)",
         "",
         'Reply with exactly one first line: "APPROVE" or "REJECT", followed by a one-paragraph reason.',
-    ]
-        .filter((line) => typeof line === "string")
-        .join("\n");
-}
-export function agentVerifierPrompt(input) {
-    const { goal, candidate, summary } = input;
-    return [
-        "You are an independent goal verifier with access to the workspace. Verify the completion claim below by",
-        "inspecting files and running non-destructive checks (tests, builds, file reads) as needed.",
-        "",
-        `Objective: ${goal.objective}`,
-        goal.criteria ? `Success criteria: ${goal.criteria}` : undefined,
-        goal.constraints ? `Constraints / non-goals: ${goal.constraints}` : undefined,
-        "",
-        `Claimed evidence: ${summary}`,
-        `Referenced tool call: ${candidate.tool} (${candidate.callID})`,
-        `Tool result digest: ${candidate.summary}`,
-        "",
-        "Do not modify the workspace unless required to reproduce a check; never commit.",
-        "End your final message with exactly one line: VERDICT: APPROVED or VERDICT: REJECTED, plus a short reason.",
     ]
         .filter((line) => typeof line === "string")
         .join("\n");

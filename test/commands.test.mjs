@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatHistory, formatStatus, formatTasks, mergeLimits, parseGoalCommand } from "../dist/commands.js";
+import { formatHistory, formatStatus, formatTasks, parseGoalCommand } from "../dist/commands.js";
 
 test("bare text becomes a set objective", () => {
   const parsed = parseGoalCommand("fix the failing tests");
@@ -9,49 +9,103 @@ test("bare text becomes a set objective", () => {
   assert.equal(parsed.error, undefined);
 });
 
-test("verbs and aliases parse", () => {
+test("single-word objectives are accepted", () => {
+  assert.equal(parseGoalCommand("refactor").verb, "set");
+  assert.equal(parseGoalCommand("refactor").text, "refactor");
+});
+
+test("core verbs parse", () => {
   assert.equal(parseGoalCommand("status").verb, "status");
   assert.equal(parseGoalCommand("").verb, "status");
-  assert.equal(parseGoalCommand("stop").verb, "pause");
-  assert.equal(parseGoalCommand("cancel").verb, "clear");
-  assert.equal(parseGoalCommand("create ship it").verb, "set");
-  assert.equal(parseGoalCommand("create ship it").text, "ship it");
-  assert.equal(parseGoalCommand("complete it passes").verb, "done");
+  assert.equal(parseGoalCommand("pause").verb, "pause");
+  assert.equal(parseGoalCommand("resume").verb, "resume");
+  assert.equal(parseGoalCommand("edit new text").verb, "edit");
+  assert.equal(parseGoalCommand("block waiting on key").verb, "block");
+  assert.equal(parseGoalCommand("done it passes").verb, "done");
+  assert.equal(parseGoalCommand("clear").verb, "clear");
   assert.equal(parseGoalCommand("history").verb, "history");
+  assert.equal(parseGoalCommand("task add x").verb, "task");
+  assert.equal(parseGoalCommand("help").verb, "help");
 });
 
-test("flags parse with values, equals, and amounts", () => {
-  const parsed = parseGoalCommand('ship it --turns 20 --tokens=150k --minutes 30 --criteria "tests pass" --constraints "no API change"');
+test("synonym aliases remain verbs so they never become goals", () => {
+  assert.equal(parseGoalCommand("complete it passes").verb, "done");
+  assert.equal(parseGoalCommand("cancel").verb, "clear");
+  assert.equal(parseGoalCommand("stop").verb, "pause");
+  assert.equal(parseGoalCommand("continue").verb, "resume");
+});
+
+test("typos are rejected with a suggestion instead of creating a goal", () => {
+  const paus = parseGoalCommand("paus");
+  assert.ok(paus.error);
+  assert.match(paus.error, /did you mean "pause"/);
+
+  const sttus = parseGoalCommand("sttus");
+  assert.ok(sttus.error);
+  assert.match(sttus.error, /did you mean "status"/);
+
+  const cleer = parseGoalCommand("cleer");
+  assert.match(cleer.error, /did you mean "clear"/);
+
+  // A real objective whose first word merely resembles a verb is still a set.
+  const sentence = parseGoalCommand("restore the backup after the crash");
+  assert.equal(sentence.error, undefined);
+  assert.equal(sentence.verb, "set");
+});
+
+test("removed commands guide instead of creating goals", () => {
+  const budget = parseGoalCommand("budget");
+  assert.ok(budget.error);
+  assert.match(budget.error, /budget limits were removed/);
+
+  const view = parseGoalCommand("view");
+  assert.match(view.error, /use \/goal status/);
+
+  const log = parseGoalCommand("log");
+  assert.match(log.error, /use \/goal history/);
+});
+
+test("flags parse for criteria, constraints and verify", () => {
+  const parsed = parseGoalCommand('ship it --criteria "tests pass" --constraints "no API change" --verify model');
   assert.equal(parsed.verb, "set");
   assert.equal(parsed.text, "ship it");
-  assert.equal(parsed.flags.maxTurns, 20);
-  assert.equal(parsed.flags.maxTokens, 150_000);
-  assert.equal(parsed.flags.maxDurationMs, 30 * 60_000);
   assert.equal(parsed.flags.criteria, "tests pass");
   assert.equal(parsed.flags.constraints, "no API change");
+  assert.equal(parsed.flags.verification, "model");
 });
 
-test("unknown flags and bad values are rejected", () => {
-  assert.match(parseGoalCommand("fix --nope 1").error, /unknown flag/);
-  assert.match(parseGoalCommand("fix --tokens zero").error, /positive number/);
-  assert.match(parseGoalCommand("fix --verify whatever").error, /evidence, model, or agent/);
+test("unknown budget flags and bad verify values are rejected", () => {
+  assert.match(parseGoalCommand("fix --tokens 100k").error, /unknown flag/);
+  assert.match(parseGoalCommand("fix --unbounded").error, /unknown flag/);
+  assert.match(parseGoalCommand("fix --verify agent").error, /evidence or model/);
 });
 
-test("mergeLimits applies flag overrides", () => {
-  const limits = mergeLimits({ maxTurns: 10, maxTokens: 1000, maxDurationMs: 5000 }, { maxTurns: 3 });
-  assert.deepEqual(limits, { maxTurns: 3, maxTokens: 1000, maxDurationMs: 5000 });
-});
-
-test("task verbs parse in both orders", () => {
-  const add = parseGoalCommand("task add write the docs");
-  assert.equal(add.verb, "task");
-  assert.equal(add.text, "add write the docs");
-  const a = parseGoalCommand("task 1 done");
-  assert.equal(a.verb, "task");
-  assert.equal(a.text, "1 done");
-  const b = parseGoalCommand("task done 2");
-  assert.equal(b.text, "done 2");
-  assert.equal(parseGoalCommand("tasks").verb, "task");
+test("formatStatus reports no-goal and goal summaries without caps", () => {
+  assert.match(formatStatus(undefined, []), /No goal/);
+  const goal = {
+    goalID: "goal_1",
+    objective: "fix tests",
+    status: "active",
+    criteria: "tests pass",
+    constraints: undefined,
+    stopReason: undefined,
+    recovered: false,
+    used: { turns: 2, contextTokens: 400, burnTokens: 0, cost: 0 },
+    activeSince: new Date().toISOString(),
+    activeMs: 0,
+    checkpoints: [{ at: new Date().toISOString(), tool: "shell", callID: "c1", summary: "42 tests", progress: false }],
+    evidence: [],
+    history: [],
+    archive: [],
+    tasks: [],
+  };
+  const text = formatStatus(goal, [{ callID: "call_9", tool: "shell", summary: "s", at: "t", progress: false }]);
+  assert.match(text, /fix tests/);
+  assert.match(text, /Status: active/);
+  assert.match(text, /turns 2/);
+  assert.match(text, /call_9/);
+  assert.doesNotMatch(text, /maxTokens|Budget/);
+  assert.match(formatHistory(goal), /History/);
 });
 
 test("formatTasks lists tasks and progress", () => {
@@ -66,31 +120,4 @@ test("formatTasks lists tasks and progress", () => {
   assert.match(text, /1\/2 done/);
   assert.match(text, /t1/);
   assert.match(text, /ship it/);
-});
-
-test("formatStatus reports no-goal and goal summaries", () => {
-  assert.match(formatStatus(undefined, []), /No goal/);
-  const goal = {
-    goalID: "goal_1",
-    objective: "fix tests",
-    status: "active",
-    criteria: "tests pass",
-    constraints: undefined,
-    stopReason: undefined,
-    recovered: false,
-    limits: { maxTurns: 10, maxTokens: 1000, maxDurationMs: 60_000 },
-    unbounded: false,
-    used: { turns: 2, contextTokens: 400, burnTokens: 0, cost: 0 },
-    activeSince: new Date().toISOString(),
-    activeMs: 0,
-    checkpoints: [{ at: new Date().toISOString(), tool: "shell", callID: "c1", summary: "42 tests", progress: false }],
-    evidence: [],
-    history: [],
-    archive: [],
-  };
-  const text = formatStatus(goal, [{ callID: "call_9", tool: "shell", summary: "s", at: "t", progress: false }]);
-  assert.match(text, /fix tests/);
-  assert.match(text, /Status: active/);
-  assert.match(text, /call_9/);
-  assert.match(formatHistory(goal), /History/);
 });

@@ -3,28 +3,9 @@
  * because they are persisted through the host plugin storage.
  */
 
-export type GoalStatus =
-  | "active"
-  | "paused"
-  | "blocked"
-  | "complete"
-  | "cancelled"
-  | "budget_limited"
-  | "usage_limited"
-  | "stalled";
+export type GoalStatus = "active" | "paused" | "blocked" | "complete" | "cancelled";
 
 export const TERMINAL_STATUSES: ReadonlySet<GoalStatus> = new Set(["complete", "cancelled"]);
-
-export interface GoalLimits {
-  maxTurns?: number;
-  /** Maximum context window tokens of a single model call (input + cached input + output + reasoning). */
-  maxTokens?: number;
-  maxDurationMs?: number;
-  /** Consecutive goal continuation turns with no tool call before stalling. */
-  noToolCallTurns?: number;
-  /** Consecutive goal continuation turns below the output threshold before stalling. */
-  noProgressTurns?: number;
-}
 
 export interface UsageSnapshot {
   input: number;
@@ -60,6 +41,14 @@ export interface EvidenceRecord {
   reason: string;
 }
 
+export interface GoalTask {
+  id: string;
+  title: string;
+  status: "todo" | "doing" | "done";
+  at: string;
+  updatedAt: string;
+}
+
 export interface ArchivedGoal {
   goalID: string;
   objective: string;
@@ -77,24 +66,10 @@ export interface GoalUsed {
   turns: number;
   /** Context tokens of the latest model call (input + output + reasoning). */
   contextTokens: number;
-  /** Cumulative tokens processed since the goal started. */
+  /** Cumulative tokens processed since the goal started (display only). */
   burnTokens: number;
-  /** Cumulative cost in USD since the goal started. */
+  /** Cumulative cost in USD since the goal started (display only). */
   cost: number;
-}
-
-export interface GoalStall {
-  noToolTurns: number;
-  noProgressTurns: number;
-  lastOutputTokens: number;
-}
-
-export interface GoalTask {
-  id: string;
-  title: string;
-  status: "todo" | "doing" | "done";
-  at: string;
-  updatedAt: string;
 }
 
 export interface GoalRecord {
@@ -116,17 +91,13 @@ export interface GoalRecord {
   updatedAt: string;
   activeSince?: string;
   activeMs: number;
-  limits: GoalLimits;
-  unbounded: boolean;
   /** Per-goal verification override; falls back to the plugin option. */
-  verification?: "evidence" | "model" | "agent";
+  verification?: "evidence" | "model";
   used: GoalUsed;
   /** Usage snapshot at goal start (goal-scoped accounting baseline). */
   base?: UsageSnapshot;
   /** Latest observed usage snapshot (persisted so restarts keep accounting). */
   lastUsage?: UsageSnapshot;
-  stall: GoalStall;
-  tasks: GoalTask[];
   /** Consecutive continuation prompt failures (persisted so restarts do not reset the safety brake). */
   promptFailures?: number;
   /** Epoch ms of the last admitted continuation prompt (cross-instance dedup). */
@@ -135,6 +106,7 @@ export interface GoalRecord {
   checkpoints: Checkpoint[];
   history: HistoryEntry[];
   archive: ArchivedGoal[];
+  tasks: GoalTask[];
 }
 
 export interface EvidenceCandidate {

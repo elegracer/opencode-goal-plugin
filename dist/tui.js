@@ -63,30 +63,14 @@ function formatDuration(ms) {
     return `${minutes}m${seconds}s`;
   return `${seconds}s`;
 }
-function budgetLine(goal) {
-  const limits = goal.limits ?? {};
+function usageLine(goal) {
   const used = goal.used ?? {
     turns: 0,
     contextTokens: 0,
     burnTokens: 0,
     cost: 0
   };
-  const parts = [];
-  if (!limits.unbounded && typeof limits.maxTurns === "number")
-    parts.push(`turns ${used.turns}/${limits.maxTurns}`);
-  else
-    parts.push(`turns ${used.turns}`);
-  if (!limits.unbounded && typeof limits.maxTokens === "number") {
-    parts.push(`ctx ${formatTokens(used.contextTokens)}/${formatTokens(limits.maxTokens)}`);
-  } else {
-    parts.push(`ctx ${formatTokens(used.contextTokens)}`);
-  }
-  if (!limits.unbounded && typeof limits.maxDurationMs === "number") {
-    parts.push(`${formatDuration(goal.activeMs ?? 0)}/${formatDuration(limits.maxDurationMs)}`);
-  } else {
-    parts.push(formatDuration(goal.activeMs ?? 0));
-  }
-  return parts.join(" \xB7 ");
+  return `turns ${used.turns} \xB7 ctx ${formatTokens(used.contextTokens)} \xB7 ${formatDuration(goal.activeMs ?? 0)}`;
 }
 function GoalSidebar(props) {
   const [goal, setGoal] = createSignal(undefined);
@@ -137,7 +121,7 @@ function GoalSidebar(props) {
       _$setProp(_el$, "flexDirection", "column");
       _$insert(_el$2, () => `\uD83C\uDFAF Goal \xB7 ${current().status}`);
       _$insert(_el$3, () => truncate(current().objective ?? "", OBJECTIVE_MAX));
-      _$insert(_el$4, () => budgetLine(current()));
+      _$insert(_el$4, () => usageLine(current()));
       _$insert(_el$, _$createComponent(Show, {
         get when() {
           return (current().tasks?.total ?? 0) > 0;

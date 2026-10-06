@@ -1,37 +1,46 @@
 /**
- * `/goal` command parsing and human-readable status rendering (pure logic).
+ * `/goal` argument parsing and human-readable status/history rendering.
+ *
+ * Simplified command surface: status, set, pause, resume, edit, block, done,
+ * clear, history, task, help. A bare non-verb argument is treated as `set`.
+ * Misspelled/unknown command words are rejected with a suggestion instead of
+ * silently becoming a new goal.
  */
 import { activeMsAt, statusLabel, taskSummary } from "./state.js";
-import { formatClock, formatDuration, formatTokens, parseAmount, truncate } from "./util.js";
+import { formatClock, formatDuration, formatTokens, truncate } from "./util.js";
 const VERB_ALIASES = {
     status: "status",
-    view: "status",
     set: "set",
-    create: "set",
-    new: "set",
-    start: "set",
     pause: "pause",
-    stop: "pause",
     resume: "resume",
-    continue: "resume",
     edit: "edit",
-    update: "edit",
     block: "block",
-    blocked: "block",
     done: "done",
-    complete: "done",
-    finish: "done",
     clear: "clear",
-    cancel: "clear",
-    reset: "clear",
-    off: "clear",
-    none: "clear",
-    delete: "clear",
     history: "history",
-    log: "history",
     task: "task",
-    tasks: "task",
     help: "help",
+    // Common synonyms kept as verbs so they can never become goal text.
+    complete: "done",
+    cancel: "clear",
+    stop: "pause",
+    continue: "resume",
+};
+/** Commands that existed before the budget/cap removal; guide instead of creating a goal. */
+const REMOVED_VERBS = {
+    budget: "budget limits were removed — goals run until you pause/clear them",
+    limits: "budget limits were removed — goals run until you pause/clear them",
+    cap: "budget limits were removed — goals run until you pause/clear them",
+    caps: "budget limits were removed — goals run until you pause/clear them",
+    token: "budget limits were removed — goals run until you pause/clear them",
+    tokens: "budget limits were removed — goals run until you pause/clear them",
+    view: "use /goal status",
+    tasks: "use /goal task list",
+    log: "use /goal history",
+    new: "use /goal set <objective>",
+    create: "use /goal set <objective>",
+    start: "use /goal set <objective>",
+    update: "use /goal edit <objective>",
 };
 export function tokenize(input) {
     const tokens = [];
@@ -65,13 +74,12 @@ export function tokenize(input) {
 function parseFlags(tokens) {
     const words = [];
     const flags = {};
-    const takeValue = (index, name, inline) => {
+    const takeValue = (index, inline) => {
         if (inline !== undefined)
             return { value: inline, next: index };
         const value = tokens[index + 1];
-        if (value === undefined || value.startsWith("--")) {
+        if (value === undefined || value.startsWith("--"))
             return { value: undefined, next: index };
-        }
         return { value, next: index + 1 };
     };
     for (let i = 0; i < tokens.length; i++) {
@@ -84,80 +92,27 @@ function parseFlags(tokens) {
         const eq = body.indexOf("=");
         const name = (eq >= 0 ? body.slice(0, eq) : body).toLowerCase();
         const inline = eq >= 0 ? body.slice(eq + 1) : undefined;
-        const positive = (value) => {
-            if (value === undefined)
-                return undefined;
-            const parsed = parseAmount(value);
-            return parsed;
-        };
         switch (name) {
-            case "turns":
-            case "max-turns": {
-                const { value, next } = takeValue(i, name, inline);
-                const parsed = positive(value);
-                if (parsed === undefined)
-                    return { words, flags, error: `--${name} requires a positive number` };
-                flags.maxTurns = parsed;
-                i = next;
-                break;
-            }
-            case "tokens":
-            case "max-tokens":
-            case "budget": {
-                const { value, next } = takeValue(i, name, inline);
-                const parsed = positive(value);
-                if (parsed === undefined)
-                    return { words, flags, error: `--${name} requires a positive number (e.g. 100k)` };
-                flags.maxTokens = parsed;
-                i = next;
-                break;
-            }
-            case "minutes": {
-                const { value, next } = takeValue(i, name, inline);
-                const parsed = positive(value);
-                if (parsed === undefined)
-                    return { words, flags, error: "--minutes requires a positive number" };
-                flags.maxDurationMs = Math.round(parsed * 60_000);
-                i = next;
-                break;
-            }
-            case "duration-ms": {
-                const { value, next } = takeValue(i, name, inline);
-                const parsed = positive(value);
-                if (parsed === undefined)
-                    return { words, flags, error: "--duration-ms requires a positive number" };
-                flags.maxDurationMs = parsed;
-                i = next;
-                break;
-            }
-            case "unbounded":
-            case "no-cap":
-            case "unlimited":
-                flags.unbounded = true;
-                break;
-            case "criteria":
-            case "success":
-            case "success-criteria": {
-                const { value, next } = takeValue(i, name, inline);
+            case "criteria": {
+                const { value, next } = takeValue(i, inline);
                 if (value === undefined)
-                    return { words, flags, error: `--${name} requires quoted text` };
+                    return { words, flags, error: "--criteria requires quoted text" };
                 flags.criteria = value;
                 i = next;
                 break;
             }
-            case "constraints":
-            case "non-goals": {
-                const { value, next } = takeValue(i, name, inline);
+            case "constraints": {
+                const { value, next } = takeValue(i, inline);
                 if (value === undefined)
-                    return { words, flags, error: `--${name} requires quoted text` };
+                    return { words, flags, error: "--constraints requires quoted text" };
                 flags.constraints = value;
                 i = next;
                 break;
             }
             case "verify": {
-                const { value, next } = takeValue(i, name, inline);
-                if (value !== "evidence" && value !== "model" && value !== "agent") {
-                    return { words, flags, error: "--verify must be evidence, model, or agent" };
+                const { value, next } = takeValue(i, inline);
+                if (value !== "evidence" && value !== "model") {
+                    return { words, flags, error: "--verify must be evidence or model" };
                 }
                 flags.verification = value;
                 i = next;
@@ -169,6 +124,36 @@ function parseFlags(tokens) {
     }
     return { words, flags };
 }
+function levenshtein(a, b) {
+    const rows = a.length + 1;
+    const cols = b.length + 1;
+    const dp = Array.from({ length: rows }, () => new Array(cols).fill(0));
+    for (let i = 0; i < rows; i++)
+        dp[i][0] = i;
+    for (let j = 0; j < cols; j++)
+        dp[0][j] = j;
+    for (let i = 1; i < rows; i++) {
+        for (let j = 1; j < cols; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+        }
+    }
+    return dp[rows - 1][cols - 1];
+}
+/** Find a near-miss command for a single typo (same first letter, distance 1). */
+function suggestVerb(head) {
+    if (!/^[a-z]+$/.test(head) || head.length < 3)
+        return undefined;
+    for (const verb of Object.keys(VERB_ALIASES)) {
+        if (verb[0] !== head[0])
+            continue;
+        if (Math.abs(verb.length - head.length) > 1)
+            continue;
+        if (levenshtein(head, verb) <= 1)
+            return verb;
+    }
+    return undefined;
+}
 export function parseGoalCommand(raw) {
     const tokens = tokenize(raw ?? "");
     const parsed = parseFlags(tokens);
@@ -177,22 +162,33 @@ export function parseGoalCommand(raw) {
     const words = parsed.words;
     if (words.length === 0)
         return { verb: "status", text: "", flags: parsed.flags };
-    const first = words[0].toLowerCase();
-    const verb = VERB_ALIASES[first];
-    if (!verb) {
-        return { verb: "set", text: words.join(" "), flags: parsed.flags };
+    const head = words[0].toLowerCase();
+    const tail = words.slice(1).join(" ");
+    const verb = VERB_ALIASES[head];
+    if (verb)
+        return { verb, text: tail, flags: parsed.flags };
+    const removed = REMOVED_VERBS[head];
+    if (removed) {
+        return {
+            verb: "help",
+            text: "",
+            flags: parsed.flags,
+            error: `"${words[0]}" is no longer a goal command — ${removed} (or use /goal set <objective>)`,
+        };
     }
-    return { verb, text: words.slice(1).join(" "), flags: parsed.flags };
-}
-export function mergeLimits(base, flags) {
-    const limits = { ...base };
-    if (flags.maxTurns !== undefined)
-        limits.maxTurns = flags.maxTurns;
-    if (flags.maxTokens !== undefined)
-        limits.maxTokens = flags.maxTokens;
-    if (flags.maxDurationMs !== undefined)
-        limits.maxDurationMs = flags.maxDurationMs;
-    return limits;
+    // Typo guard: only when the rest is empty or flags (so real objectives like
+    // "restore the backup" are still accepted).
+    const onlyFlagsLeft = words.length === 1 || words.slice(1).every((word) => word.startsWith("--"));
+    const suggestion = onlyFlagsLeft ? suggestVerb(head) : undefined;
+    if (suggestion) {
+        return {
+            verb: "help",
+            text: "",
+            flags: parsed.flags,
+            error: `unknown command "${words[0]}" — did you mean "${suggestion}"? To set a goal, use /goal set <objective>`,
+        };
+    }
+    return { verb: "set", text: words.join(" "), flags: parsed.flags };
 }
 export function formatStatus(goal, candidates) {
     if (!goal) {
@@ -205,20 +201,7 @@ export function formatStatus(goal, candidates) {
         lines.push(`Criteria: ${truncate(goal.criteria, 200)}`);
     if (goal.constraints)
         lines.push(`Constraints: ${truncate(goal.constraints, 200)}`);
-    const budget = [];
-    if (goal.unbounded) {
-        budget.push("caps: unbounded");
-    }
-    else {
-        if (goal.limits.maxTurns !== undefined)
-            budget.push(`turns ${goal.used.turns}/${goal.limits.maxTurns}`);
-        if (goal.limits.maxTokens !== undefined)
-            budget.push(`context ${formatTokens(goal.used.contextTokens)}/${formatTokens(goal.limits.maxTokens)}`);
-        if (goal.limits.maxDurationMs !== undefined)
-            budget.push(`elapsed ${formatDuration(activeMsAt(goal, new Date().toISOString()))}/${formatDuration(goal.limits.maxDurationMs)}`);
-    }
-    if (budget.length)
-        lines.push(`Budget: ${budget.join(" · ")}`);
+    lines.push(`Used: turns ${goal.used.turns} · context ${formatTokens(goal.used.contextTokens)} · elapsed ${formatDuration(activeMsAt(goal, new Date().toISOString()))}`);
     if (goal.checkpoints.length) {
         const last = goal.checkpoints[goal.checkpoints.length - 1];
         lines.push(`Latest checkpoint: [${formatClock(last.at)}] ${truncate(last.summary, 160)}`);
@@ -289,7 +272,9 @@ export function commandHelp(commandName) {
         `/${commandName} task add <title> — add a task`,
         `/${commandName} task <ref> todo|doing|done — update a task (ref = id or number)`,
         `/${commandName} task list — list tasks`,
+        `/${commandName} help — this help`,
         "",
-        "Flags for set: --turns N --tokens N --minutes N --unbounded --criteria \"...\" --constraints \"...\" --verify evidence|model|agent",
+        'Flags for set: --criteria "..." --constraints "..." --verify evidence|model',
+        "Goals run until you pause/clear them; there are no automatic budget limits.",
     ].join("\n");
 }

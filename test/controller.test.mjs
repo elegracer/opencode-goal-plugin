@@ -28,11 +28,10 @@ test("status reports no goal on a fresh session", async () => {
 
 test("setting a goal stores it, replies, and starts work", async () => {
   const { harness, controller } = await setup();
-  await harness.runCommand('fix tests --turns 5 --criteria "tests pass" --constraints "no api change"');
+  await harness.runCommand('fix tests --criteria "tests pass" --constraints "no api change"');
   const goal = await storeFor(harness).load("ses_main");
   assert.equal(goal.status, "active");
   assert.equal(goal.objective, "fix tests");
-  assert.equal(goal.limits.maxTurns, 5);
   assert.equal(goal.criteria, "tests pass");
   assert.equal(goal.constraints, "no api change");
   assert.match(harness.synthetics.at(-1).text, /Goal started/);
@@ -243,8 +242,6 @@ test("restart recovery downgrades active goals to paused", async () => {
       projectID: "proj_1",
       locationDirectory: "/work/project",
       objective: "survives restart",
-      limits: { maxTurns: 3 },
-      unbounded: false,
       at: new Date().toISOString(),
     }),
   );
@@ -268,10 +265,10 @@ test("retry grace prevents a transient failure from pausing", async () => {
   controller.dispose();
 });
 
-test("long-session cumulative usage does not trip the token cap", async () => {
+test("long-session cumulative usage stays display-only", async () => {
   const { harness, controller } = await setup();
-  await harness.runCommand("fix tests --tokens 100k");
-  // Baseline snapshot: cumulative session totals already far above the cap.
+  await harness.runCommand("fix tests");
+  // Baseline snapshot: cumulative session totals never stop the goal.
   harness.emitEvent("session.usage.updated", {
     sessionID: "ses_main",
     tokens: { input: 7_000_000, output: 100_000, reasoning: 0, cache: { read: 0, write: 0 } },

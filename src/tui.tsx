@@ -33,23 +33,9 @@ function formatDuration(ms: number): string {
   return `${seconds}s`;
 }
 
-function budgetLine(goal: GoalRpcSnapshot): string {
-  const limits = goal.limits ?? {};
+function usageLine(goal: GoalRpcSnapshot): string {
   const used = goal.used ?? { turns: 0, contextTokens: 0, burnTokens: 0, cost: 0 };
-  const parts: string[] = [];
-  if (!limits.unbounded && typeof limits.maxTurns === "number") parts.push(`turns ${used.turns}/${limits.maxTurns}`);
-  else parts.push(`turns ${used.turns}`);
-  if (!limits.unbounded && typeof limits.maxTokens === "number") {
-    parts.push(`ctx ${formatTokens(used.contextTokens)}/${formatTokens(limits.maxTokens)}`);
-  } else {
-    parts.push(`ctx ${formatTokens(used.contextTokens)}`);
-  }
-  if (!limits.unbounded && typeof limits.maxDurationMs === "number") {
-    parts.push(`${formatDuration(goal.activeMs ?? 0)}/${formatDuration(limits.maxDurationMs)}`);
-  } else {
-    parts.push(formatDuration(goal.activeMs ?? 0));
-  }
-  return parts.join(" · ");
+  return `turns ${used.turns} · ctx ${formatTokens(used.contextTokens)} · ${formatDuration(goal.activeMs ?? 0)}`;
 }
 
 function GoalSidebar(props: { context: any; sessionID: string }) {
@@ -99,7 +85,7 @@ function GoalSidebar(props: { context: any; sessionID: string }) {
         <box flexDirection="column">
           <text>{`🎯 Goal · ${current().status}`}</text>
           <text>{truncate(current().objective ?? "", OBJECTIVE_MAX)}</text>
-          <text>{budgetLine(current())}</text>
+          <text>{usageLine(current())}</text>
           <Show when={(current().tasks?.total ?? 0) > 0}>
             <text>{`Tasks ${current().tasks?.done ?? 0}/${current().tasks?.total ?? 0}`}</text>
             <For each={(current().taskItems ?? []).filter((task) => task.status !== "done").slice(0, 4)}>

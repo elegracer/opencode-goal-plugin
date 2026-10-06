@@ -12,10 +12,6 @@ export interface GoalSetInput {
   objective: string;
   criteria?: string;
   constraints?: string;
-  unbounded?: boolean;
-  maxTurns?: number;
-  maxTokens?: number;
-  maxDurationMs?: number;
 }
 
 export interface GoalUpdateInput {
@@ -56,10 +52,6 @@ export function goalToolDefinitions(api: GoalToolApi): ToolDefinition[] {
           objective: { type: "string", minLength: 1, description: "What must be achieved." },
           criteria: { type: "string", description: "Optional concrete success criteria." },
           constraints: { type: "string", description: "Optional constraints / non-goals." },
-          unbounded: { type: "boolean", description: "Explicitly disable numeric caps (turn/token/duration)." },
-          maxTurns: { type: "integer", minimum: 1 },
-          maxTokens: { type: "integer", minimum: 1 },
-          maxDurationMs: { type: "integer", minimum: 1 },
         },
         required: ["objective"],
         additionalProperties: false,

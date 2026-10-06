@@ -18,9 +18,6 @@ const VALID_STATUSES = new Set([
     "blocked",
     "complete",
     "cancelled",
-    "budget_limited",
-    "usage_limited",
-    "stalled",
 ]);
 export class GoalStore {
     storage;

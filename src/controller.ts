@@ -21,11 +21,11 @@ import type {
   SessionInfo,
   ToolCallContext,
 } from "./api.js";
-import { commandHelp, formatHistory, formatStatus, formatTasks, mergeLimits, parseGoalCommand } from "./commands.js";
+import { commandHelp, formatHistory, formatStatus, formatTasks, parseGoalCommand } from "./commands.js";
 import { EvidenceTracker, evidenceQuality, isProgressTool, summarizeToolResult } from "./evidence.js";
 import { ContinuationLoop } from "./loop.js";
 import { resolveOptions, type ResolvedOptions } from "./options.js";
-import { buildSystemBlock, continuationText, INTERNAL_METADATA_KEY, wrapUpText } from "./prompts.js";
+import { buildSystemBlock, continuationText, INTERNAL_METADATA_KEY } from "./prompts.js";
 import { GoalStore } from "./store.js";
 import { GoalRpc } from "./rpc.js";
 import {
@@ -37,23 +37,23 @@ import {
   completeGoal,
   editGoal,
   findTask,
-  limitGoal,
   pauseGoal,
-  pushHistory,
   recordCheckpoint,
   resumeGoal,
-  settleTurn,
   startGoal,
   statusLabel,
   taskSummary,
   updateTask,
 } from "./state.js";
 import { goalToolDefinitions, type GoalSetInput, type GoalUpdateInput } from "./tools.js";
-import type { EvidenceCandidate, EvidenceRecord, GoalRecord, GoalStatus, UsageSnapshot } from "./types.js";
+import type { EvidenceCandidate, EvidenceRecord, GoalRecord, UsageSnapshot } from "./types.js";
 import { asNumber, asString, errorText, isRecord, makeID, nowIso, truncate } from "./util.js";
 import { extractTranscript, verifyCompletion } from "./verify.js";
 
 export const PLUGIN_ID = "opencode-goal";
+
+/** Slash command name. */
+const COMMAND_NAME = "goal";
 
 /** Continuations admitted within this window are considered the same turn (cross-instance dedup). */
 const CONTINUATION_DEDUP_MS = 10_000;
@@ -65,8 +65,6 @@ interface SessionCacheEntry {
 
 interface UsageState {
   snapshot?: UsageSnapshot;
-  /** Output tokens accumulated since the last turn boundary. */
-  pendingOutput: number;
 }
 
 export class GoalController implements GoalToolApiLike {
@@ -168,7 +166,6 @@ export class GoalController implements GoalToolApiLike {
       stopReason: goal.stopReason,
       recovered: goal.recovered ?? false,
       used: goal.used,
-      limits: goal.unbounded ? { unbounded: true } : goal.limits,
       activeMs: activeMsAt(goal, now),
       tasks: taskSummary(goal),
       taskItems: (goal.tasks ?? []).slice(0, 8).map((task) => ({
@@ -342,7 +339,7 @@ export class GoalController implements GoalToolApiLike {
   // ── Registration ─────────────────────────────────────────────────────────
 
   private async registerCommand(): Promise<void> {
-    const name = this.options.commandName;
+    const name = COMMAND_NAME;
     try {
       await this.ctx.command.transform((editor) => {
         editor.add({
@@ -401,7 +398,7 @@ export class GoalController implements GoalToolApiLike {
     const block = buildSystemBlock(goal, {
       candidates: this.candidates.list(root),
       delegated: root !== sessionID,
-      maxChars: this.options.contextInjectionMaxChars,
+      maxChars: 4_000,
     });
     if (!block) return;
     event.system.push({ type: "text", text: block, metadata: { plugin: PLUGIN_ID } });
@@ -464,7 +461,6 @@ export class GoalController implements GoalToolApiLike {
       progress: isProgressTool(tool),
     };
     this.candidates.record(root, candidate);
-    this.loop.noteToolCall(root);
     await this.store.mutate(root, (current) => {
       if (current && current.status === "active") {
         recordCheckpoint(current, {
@@ -519,7 +515,7 @@ export class GoalController implements GoalToolApiLike {
         this.clearFailureTimer(sessionID);
         const boundary = this.loop.noteBoundary(sessionID, asString(event.id), "execution");
         if (boundary.duplicate) return;
-        await this.onBoundary(sessionID, boundary.wasGoalTurn, boundary.hadToolCall);
+        await this.loop.schedule(sessionID);
         return;
       }
       case "session.execution.failed": {
@@ -553,7 +549,7 @@ export class GoalController implements GoalToolApiLike {
         if (this.loop.isRetrying(sessionID)) return;
         const boundary = this.loop.noteBoundary(sessionID, asString(event.id), "idle");
         if (boundary.duplicate) return;
-        await this.onBoundary(sessionID, boundary.wasGoalTurn, boundary.hadToolCall);
+        await this.loop.schedule(sessionID);
         return;
       }
       case "session.usage.updated": {
@@ -651,9 +647,6 @@ export class GoalController implements GoalToolApiLike {
           cost: Math.max(0, snapshot.cost - previous.cost),
         }
       : undefined;
-    if (previous) {
-      state.pendingOutput += Math.max(0, snapshot.output - previous.output);
-    }
     state.snapshot = snapshot;
 
     if (!goal) return;
@@ -666,73 +659,10 @@ export class GoalController implements GoalToolApiLike {
   private usageState(sessionID: string): UsageState {
     let state = this.usageStates.get(sessionID);
     if (!state) {
-      state = { pendingOutput: 0 };
+      state = {};
       this.usageStates.set(sessionID, state);
     }
     return state;
-  }
-
-  private consumePendingOutput(sessionID: string): number {
-    const state = this.usageState(sessionID);
-    const value = state.pendingOutput;
-    state.pendingOutput = 0;
-    return value;
-  }
-
-  // ── Boundary handling ────────────────────────────────────────────────────
-
-  private async onBoundary(sessionID: string, wasGoalTurn: boolean, hadToolCall: boolean): Promise<void> {
-    const goal = await this.store.load(sessionID);
-    if (!goal) return;
-
-    if (goal.status !== "active") return;
-
-    const outputDelta = this.consumePendingOutput(sessionID);
-    let verdict: { status: GoalStatus; reason: string } | undefined;
-    const updated = await this.store.mutate(sessionID, (current) => {
-      if (!current || current.status !== "active") return current;
-      verdict = settleTurn(current, {
-        wasGoalTurn,
-        hadToolCall,
-        outputDelta,
-        at: nowIso(),
-        stallOutputTokens: this.options.stallOutputTokens,
-      });
-      if (verdict) {
-        limitGoal(current, verdict.status, verdict.reason, nowIso());
-      }
-      return current;
-    });
-
-    if (verdict && updated) {
-      this.loop.cancel(sessionID);
-      if (this.options.wrapUpOnLimit) await this.sendWrapUp(sessionID, updated);
-      return;
-    }
-    await this.loop.schedule(sessionID);
-  }
-
-  private async sendWrapUp(sessionID: string, goal: GoalRecord): Promise<void> {
-    // Dedup via persisted history so a restart cannot send a second wrap-up.
-    const fresh = await this.store.load(sessionID);
-    if (!fresh || fresh.goalID !== goal.goalID) return;
-    if (fresh.history.some((entry) => entry.action === "wrap-up")) return;
-    if (!(await this.claim(sessionID, "wrapup"))) return;
-    try {
-      await this.ctx.session.prompt({
-        sessionID,
-        text: wrapUpText(goal),
-        metadata: { [INTERNAL_METADATA_KEY]: true },
-      });
-      await this.store.mutate(sessionID, (current) => {
-        if (current && current.goalID === goal.goalID) {
-          pushHistory(current, "wrap-up", current.status, current.status, goal.stopReason);
-        }
-        return current;
-      });
-    } catch (error) {
-      this.log("wrap-up prompt failed", errorText(error));
-    }
   }
 
   // ── Continuation loop integration ────────────────────────────────────────
@@ -800,7 +730,7 @@ export class GoalController implements GoalToolApiLike {
     const raw = input.prompt?.text ?? "";
     const parsed = parseGoalCommand(raw);
     if (parsed.error) {
-      await this.reply(sessionID, `⚠️ ${parsed.error}\n\n${commandHelp(this.options.commandName)}`);
+      await this.reply(sessionID, `⚠️ ${parsed.error}\n\n${commandHelp(COMMAND_NAME)}`);
       return;
     }
 
@@ -811,7 +741,7 @@ export class GoalController implements GoalToolApiLike {
         return;
       }
       case "help": {
-        await this.reply(sessionID, commandHelp(this.options.commandName));
+        await this.reply(sessionID, commandHelp(COMMAND_NAME));
         return;
       }
       case "history": {
@@ -913,7 +843,7 @@ export class GoalController implements GoalToolApiLike {
         return;
       }
       default:
-        await this.reply(sessionID, commandHelp(this.options.commandName));
+        await this.reply(sessionID, commandHelp(COMMAND_NAME));
         return;
     }
   }
@@ -976,20 +906,18 @@ export class GoalController implements GoalToolApiLike {
   private async startGoalFromCommand(
     sessionID: string,
     objective: string,
-    flags: Parameters<typeof mergeLimits>[1],
+    flags: { criteria?: string; constraints?: string; verification?: "evidence" | "model" },
     invocation: CommandInvocation,
   ): Promise<void> {
     const text = objective.trim();
     if (!text) {
-      await this.reply(sessionID, commandHelp(this.options.commandName));
+      await this.reply(sessionID, commandHelp(COMMAND_NAME));
       return;
     }
     const goal = await this.createGoal(sessionID, {
       objective: text,
       criteria: flags.criteria,
       constraints: flags.constraints,
-      limits: mergeLimits(this.options.defaultLimits, flags),
-      unbounded: flags.unbounded ?? this.options.unboundedByDefault,
       verification: flags.verification,
     });
     this.candidates.clear(sessionID);
@@ -1018,9 +946,7 @@ export class GoalController implements GoalToolApiLike {
       objective: string;
       criteria?: string;
       constraints?: string;
-      limits: ReturnType<typeof mergeLimits>;
-      unbounded: boolean;
-      verification?: "evidence" | "model" | "agent";
+      verification?: "evidence" | "model";
     },
   ): Promise<GoalRecord> {
     const at = nowIso();
@@ -1034,8 +960,6 @@ export class GoalController implements GoalToolApiLike {
         objective: input.objective,
         criteria: input.criteria,
         constraints: input.constraints,
-        limits: input.limits,
-        unbounded: input.unbounded,
         at,
         baseUsage,
         verification: input.verification,
@@ -1069,7 +993,6 @@ export class GoalController implements GoalToolApiLike {
           status: goal.status,
           stopReason: goal.stopReason,
           recovered: goal.recovered ?? false,
-          limits: goal.unbounded ? { unbounded: true } : goal.limits,
           used: goal.used,
           activeMs: activeMsAt(goal, now),
           tasks: goal.tasks,
@@ -1123,16 +1046,10 @@ export class GoalController implements GoalToolApiLike {
     }
     const objective = (input.objective ?? "").trim();
     if (!objective) return { ok: false, message: "objective is required." };
-    const limits = { ...this.options.defaultLimits };
-    if (input.maxTurns !== undefined) limits.maxTurns = input.maxTurns;
-    if (input.maxTokens !== undefined) limits.maxTokens = input.maxTokens;
-    if (input.maxDurationMs !== undefined) limits.maxDurationMs = input.maxDurationMs;
     const goal = await this.createGoal(sessionID, {
       objective,
       criteria: input.criteria,
       constraints: input.constraints,
-      limits,
-      unbounded: input.unbounded ?? this.options.unboundedByDefault,
     });
     this.candidates.clear(sessionID);
     return { ok: true, message: `Goal created: ${goal.objective}` };

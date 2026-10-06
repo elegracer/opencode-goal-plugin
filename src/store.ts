@@ -28,9 +28,6 @@ const VALID_STATUSES: ReadonlySet<string> = new Set<GoalStatus>([
   "blocked",
   "complete",
   "cancelled",
-  "budget_limited",
-  "usage_limited",
-  "stalled",
 ]);
 
 export class GoalStore {

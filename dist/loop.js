@@ -3,9 +3,10 @@
  *
  * Turn boundaries come from `session.execution.*` events (the reliable V2
  * boundary); `session.idle` is only a fallback for builds that do not deliver
- * execution events, and duplicates are filtered by event id and a short
- * time window. The loop never has more than one continuation in flight per
- * session.
+ * execution events, and duplicates are filtered by event id and a short time
+ * window. The loop never has more than one continuation in flight per session.
+ * There are no budget caps: it keeps scheduling until the goal is paused,
+ * cleared, completed, or blocked.
  */
 import { errorText } from "./util.js";
 function freshState() {
@@ -15,9 +16,6 @@ function freshState() {
         retrying: false,
         awaitingBoundary: false,
         lastBoundaryAt: 0,
-        turnHadToolCall: false,
-        promptFailures: 0,
-        wrapUpSent: false,
         seenExecution: false,
     };
 }
@@ -41,16 +39,12 @@ export class ContinuationLoop {
     noteExecutionStarted(sessionID) {
         const state = this.state(sessionID);
         state.busy = true;
-        state.turnHadToolCall = false;
         state.seenExecution = true;
         state.retrying = false;
         if (state.retryTimer) {
             clearTimeout(state.retryTimer);
             state.retryTimer = undefined;
         }
-    }
-    noteToolCall(sessionID) {
-        this.state(sessionID).turnHadToolCall = true;
     }
     isRetrying(sessionID) {
         return this.state(sessionID).retrying;
@@ -97,15 +91,13 @@ export class ContinuationLoop {
             // execution events. Once they are seen, or while a turn is in flight,
             // idle must not settle the turn (a late idle otherwise double-schedules
             // a continuation).
-            if (state.seenExecution || state.busy) {
-                return { duplicate: true, wasGoalTurn: false, hadToolCall: false };
-            }
-            // A reliable execution boundary for the same turn suppresses idle.
+            if (state.seenExecution || state.busy)
+                return { duplicate: true, wasGoalTurn: false };
             if (now - state.lastBoundaryAt < 2_000)
-                return { duplicate: true, wasGoalTurn: false, hadToolCall: false };
+                return { duplicate: true, wasGoalTurn: false };
         }
         if (eventID && state.lastBoundaryEventID === eventID) {
-            return { duplicate: true, wasGoalTurn: false, hadToolCall: false };
+            return { duplicate: true, wasGoalTurn: false };
         }
         if (eventID)
             state.lastBoundaryEventID = eventID;
@@ -113,9 +105,7 @@ export class ContinuationLoop {
         state.busy = false;
         const wasGoalTurn = state.awaitingBoundary;
         state.awaitingBoundary = false;
-        const hadToolCall = state.turnHadToolCall;
-        state.turnHadToolCall = false;
-        return { duplicate: false, wasGoalTurn, hadToolCall };
+        return { duplicate: false, wasGoalTurn };
     }
     noteFailure(sessionID) {
         const state = this.state(sessionID);
@@ -124,21 +114,6 @@ export class ContinuationLoop {
             clearTimeout(state.timer);
         state.timer = undefined;
         state.awaitingBoundary = false;
-    }
-    /** Returns the number of consecutive prompt failures after this one. */
-    notePromptFailure(sessionID) {
-        const state = this.state(sessionID);
-        state.promptFailures += 1;
-        return state.promptFailures;
-    }
-    resetPromptFailures(sessionID) {
-        this.state(sessionID).promptFailures = 0;
-    }
-    wrapUpAlreadySent(sessionID) {
-        return this.state(sessionID).wrapUpSent;
-    }
-    markWrapUpSent(sessionID) {
-        this.state(sessionID).wrapUpSent = true;
     }
     /** Schedule exactly one continuation if allowed. */
     async schedule(sessionID) {
@@ -177,11 +152,10 @@ export class ContinuationLoop {
             const sent = await this.deps.sendContinuation(sessionID, goal);
             if (!sent) {
                 // Another plugin instance already sent this continuation (or the goal
-                // changed); release the flag without counting a turn or a failure.
+                // changed); release the flag without counting a failure.
                 state.awaitingBoundary = false;
                 return;
             }
-            state.promptFailures = 0;
             this.deps.log("continuation sent", { sessionID });
         }
         catch (error) {

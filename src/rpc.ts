@@ -14,7 +14,6 @@ export interface GoalRpcSnapshot {
   stopReason?: string;
   recovered?: boolean;
   used?: { turns: number; contextTokens: number; burnTokens: number; cost: number };
-  limits?: { unbounded?: boolean; maxTurns?: number; maxTokens?: number; maxDurationMs?: number };
   activeMs?: number;
   tasks?: { total: number; done: number; doing: number };
   taskItems?: Array<{ id: string; title: string; status: "todo" | "doing" | "done" }>;

@@ -3,15 +3,12 @@
  *
  * - "evidence": structural gate only (candidate reference + summary quality).
  * - "model": one independent, tool-less model call adjudicates the claim.
- * - "agent": a bounded child session inspects the workspace and executes
- *   non-destructive checks, then reports a verdict.
  *
- * All failures are fail-closed: an unparsable or failed verification rejects
- * the completion and the goal is paused with the reason, never silently
- * completed.
+ * All failures are fail-closed unless the verifier model is implicit and the
+ * host refuses the call (then the evidence gate applies with the degradation
+ * recorded).
  */
-import { parseVerdict } from "./prompts.js";
-import { completionReviewPrompt, agentVerifierPrompt } from "./prompts.js";
+import { parseVerdict, completionReviewPrompt } from "./prompts.js";
 import { errorText, isRecord } from "./util.js";
 function withTimeout(promise, ms) {
     return new Promise((resolve, reject) => {
@@ -58,79 +55,32 @@ export async function verifyCompletion(ctx, verification, verifierTimeoutMs, inp
     if (verification === "evidence") {
         return { approved: true, tier: "evidence", reason: "evidence accepted" };
     }
-    if (verification === "model") {
-        const model = input.verifierModel;
-        if (!model) {
-            // No model available to adjudicate: accept the evidence gate, but make
-            // the degradation visible in the audit trail.
-            return { approved: true, tier: "evidence (no verifier model)", reason: "verifier model unavailable" };
-        }
-        try {
-            const prompt = completionReviewPrompt(input);
-            const result = await withTimeout(ctx.generate.text({ model, prompt }), verifierTimeoutMs);
-            const verdict = parseVerdict(result?.text);
-            if (!verdict) {
-                return { approved: false, tier: "model", reason: "verifier returned an unparsable verdict" };
-            }
-            return { approved: verdict.approved, tier: "model", reason: verdict.reason };
-        }
-        catch (error) {
-            if (input.verifierExplicit) {
-                return { approved: false, tier: "model", reason: `verifier failed: ${errorText(error)}` };
-            }
-            // Implicit verifier (session or host default model): a host restriction
-            // such as a free-tier limit must not wedge the goal. Degrade to the
-            // evidence gate and record the degradation.
-            return {
-                approved: true,
-                tier: "evidence (verifier unavailable)",
-                reason: `verifier call failed: ${errorText(error)}`,
-            };
-        }
+    const model = input.verifierModel;
+    if (!model) {
+        // No model available to adjudicate: accept the evidence gate, but make
+        // the degradation visible in the audit trail.
+        return { approved: true, tier: "evidence (no verifier model)", reason: "verifier model unavailable" };
     }
-    // Agent tier: an independent child session inspects the workspace.
-    let childID;
     try {
-        const child = await ctx.session.create({
-            parentID: input.goal.sessionID,
-            title: "Goal verification",
-            metadata: { "opencode.goal.verifier": true },
-        });
-        childID = (child?.id ?? child?.sessionID);
-        if (!childID) {
-            return { approved: false, tier: "agent", reason: "could not create the verification session" };
-        }
-        await ctx.session.prompt({
-            sessionID: childID,
-            text: agentVerifierPrompt(input),
-            metadata: { "opencode.goal.internal": true },
-        });
-        await withTimeout(ctx.session.wait({ sessionID: childID }), verifierTimeoutMs);
-        const messages = await ctx.session.context({ sessionID: childID });
-        const transcript = extractTranscript(messages, 16_000);
-        const verdict = parseVerdict(transcript);
+        const prompt = completionReviewPrompt(input);
+        const result = await withTimeout(ctx.generate.text({ model, prompt }), verifierTimeoutMs);
+        const verdict = parseVerdict(result?.text);
         if (!verdict) {
-            return { approved: false, tier: "agent", reason: "verifier session returned no verdict" };
+            return { approved: false, tier: "model", reason: "verifier returned an unparsable verdict" };
         }
-        return { approved: verdict.approved, tier: "agent", reason: verdict.reason };
+        return { approved: verdict.approved, tier: "model", reason: verdict.reason };
     }
     catch (error) {
-        return { approved: false, tier: "agent", reason: `verifier failed: ${errorText(error)}` };
-    }
-    finally {
-        if (childID) {
-            try {
-                await ctx.session.interrupt({ sessionID: childID });
-            }
-            catch {
-                // ignore
-            }
-            try {
-                await ctx.session.remove({ sessionID: childID });
-            }
-            catch {
-                // ignore
-            }
+        if (input.verifierExplicit) {
+            return { approved: false, tier: "model", reason: `verifier failed: ${errorText(error)}` };
         }
+        // Implicit verifier (session or host default model): a host restriction
+        // such as a free-tier limit must not wedge the goal. Degrade to the
+        // evidence gate and record the degradation.
+        return {
+            approved: true,
+            tier: "evidence (verifier unavailable)",
+            reason: `verifier call failed: ${errorText(error)}`,
+        };
     }
 }

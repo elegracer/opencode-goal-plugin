@@ -7,11 +7,9 @@ import {
   cancelGoal,
   completeGoal,
   findTask,
-  limitGoal,
   pauseGoal,
   recordCheckpoint,
   resumeGoal,
-  settleTurn,
   startGoal,
   taskSummary,
   updateTask,
@@ -22,12 +20,10 @@ const baseInput = {
   projectID: "proj_1",
   locationDirectory: "/work",
   objective: "fix tests",
-  limits: { maxTurns: 3, maxTokens: 1000, maxDurationMs: 60_000, noToolCallTurns: 2, noProgressTurns: 2 },
-  unbounded: false,
   at: "2026-01-01T00:00:00.000Z",
 };
 
-test("startGoal creates an active goal", () => {
+test("startGoal creates an active goal without caps", () => {
   const goal = startGoal(undefined, baseInput);
   assert.equal(goal.status, "active");
   assert.equal(goal.objective, "fix tests");
@@ -58,19 +54,6 @@ test("startGoal preserves terminal archived statuses", () => {
   assert.equal(second.archive[0].status, "complete");
 });
 
-test("cancelGoal stops the clock and records one history entry", () => {
-  const goal = startGoal(undefined, baseInput);
-  cancelGoal(goal, "cleared by user", "2026-01-01T00:00:07.000Z");
-  assert.equal(goal.status, "cancelled");
-  assert.equal(goal.activeMs, 7_000);
-  assert.equal(goal.activeSince, undefined);
-  const last = goal.history[goal.history.length - 1];
-  assert.equal(last.action, "cancelled");
-  assert.equal(last.detail, "cleared by user");
-  cancelGoal(goal, "again", "2026-01-01T00:00:09.000Z");
-  assert.equal(goal.history.length, 2);
-});
-
 test("pause and resume manage the active clock", () => {
   const goal = startGoal(undefined, baseInput);
   pauseGoal(goal, "user", "2026-01-01T00:00:10.000Z");
@@ -82,6 +65,19 @@ test("pause and resume manage the active clock", () => {
   assert.equal(goal.status, "active");
   assert.equal(goal.recovered, undefined);
   assert.equal(activeMsAt(goal, "2026-01-01T00:01:05.000Z"), 15_000);
+});
+
+test("cancelGoal stops the clock and records one history entry", () => {
+  const goal = startGoal(undefined, baseInput);
+  cancelGoal(goal, "cleared by user", "2026-01-01T00:00:07.000Z");
+  assert.equal(goal.status, "cancelled");
+  assert.equal(goal.activeMs, 7_000);
+  assert.equal(goal.activeSince, undefined);
+  const last = goal.history[goal.history.length - 1];
+  assert.equal(last.action, "cancelled");
+  assert.equal(last.detail, "cleared by user");
+  cancelGoal(goal, "again", "2026-01-01T00:00:09.000Z");
+  assert.equal(goal.history.length, 2);
 });
 
 test("usage accounting is goal-scoped and per-call for context", () => {
@@ -100,99 +96,15 @@ test("usage accounting is goal-scoped and per-call for context", () => {
   assert.equal(Math.round(goal.used.cost * 100), 100);
 });
 
-test("cumulative session totals never trip the context cap by themselves", () => {
+test("cumulative session totals are display-only and never stop a goal", () => {
   const goal = startGoal(undefined, baseInput);
-  // A long session: cumulative totals are far beyond maxTokens (1000).
   accountUsage(goal, { input: 7_000_000, output: 100_000, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 5 });
-  const verdict = settleTurn(goal, {
-    wasGoalTurn: true,
-    hadToolCall: true,
-    outputDelta: 200,
-    at: "2026-01-01T00:00:01.000Z",
-    stallOutputTokens: 50,
-  });
-  assert.equal(verdict, undefined);
-
-  // But one call whose context window exceeds the cap does trip it.
-  accountUsage(
-    goal,
-    { input: 7_001_000, output: 100_100, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 5.1 },
-    { input: 1_000, output: 100, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0.1 },
-  );
-  const tripped = settleTurn(goal, {
-    wasGoalTurn: true,
-    hadToolCall: true,
-    outputDelta: 200,
-    at: "2026-01-01T00:00:02.000Z",
-    stallOutputTokens: 50,
-  });
-  assert.equal(tripped?.status, "usage_limited");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.used.burnTokens, 0);
 });
 
-test("turn settlement trips the turn cap", () => {
+test("checkpoints keep a bounded ring", () => {
   const goal = startGoal(undefined, baseInput);
-  goal.used.turns = 3;
-  const verdict = settleTurn(goal, {
-    wasGoalTurn: true,
-    hadToolCall: true,
-    outputDelta: 200,
-    at: "2026-01-01T00:00:01.000Z",
-    stallOutputTokens: 50,
-  });
-  assert.ok(verdict);
-  assert.equal(verdict.status, "budget_limited");
-  limitGoal(goal, verdict.status, verdict.reason, "2026-01-01T00:00:01.000Z");
-  assert.equal(goal.status, "budget_limited");
-});
-
-test("turn settlement trips the context token cap", () => {
-  const goal = startGoal(undefined, baseInput);
-  goal.used.contextTokens = 1001;
-  const verdict = settleTurn(goal, {
-    wasGoalTurn: true,
-    hadToolCall: true,
-    outputDelta: 200,
-    at: "2026-01-01T00:00:01.000Z",
-    stallOutputTokens: 50,
-  });
-  assert.equal(verdict?.status, "usage_limited");
-});
-
-test("tool-free continuation turns stall", () => {
-  const goal = startGoal(undefined, baseInput);
-  const settle = (at) =>
-    settleTurn(goal, { wasGoalTurn: true, hadToolCall: false, outputDelta: 100, at, stallOutputTokens: 50 });
-  assert.equal(settle("2026-01-01T00:00:01.000Z"), undefined);
-  const verdict = settle("2026-01-01T00:00:02.000Z");
-  assert.equal(verdict?.status, "stalled");
-});
-
-test("low-output continuation turns stall", () => {
-  const goal = startGoal(undefined, baseInput);
-  const settle = (at) =>
-    settleTurn(goal, { wasGoalTurn: true, hadToolCall: true, outputDelta: 5, at, stallOutputTokens: 50 });
-  assert.equal(settle("2026-01-01T00:00:01.000Z"), undefined);
-  const verdict = settle("2026-01-01T00:00:02.000Z");
-  assert.equal(verdict?.status, "stalled");
-});
-
-test("unbounded goals still stall on repeated tool-free turns", () => {
-  const goal = startGoal(undefined, { ...baseInput, unbounded: true, limits: { noToolCallTurns: 1 } });
-  goal.used.turns = 100;
-  goal.used.contextTokens = 999_999;
-  const verdict = settleTurn(goal, {
-    wasGoalTurn: true,
-    hadToolCall: false,
-    outputDelta: 100,
-    at: "2026-01-01T00:00:01.000Z",
-    stallOutputTokens: 50,
-  });
-  assert.equal(verdict?.status, "stalled");
-});
-
-test("checkpoints reset the tool-free counter and cap the ring", () => {
-  const goal = startGoal(undefined, baseInput);
-  goal.stall.noToolTurns = 2;
   for (let i = 0; i < 60; i++) {
     recordCheckpoint(goal, {
       at: `2026-01-01T00:00:${String(i % 60).padStart(2, "0")}.000Z`,
@@ -202,7 +114,6 @@ test("checkpoints reset the tool-free counter and cap the ring", () => {
       progress: true,
     });
   }
-  assert.equal(goal.stall.noToolTurns, 0);
   assert.equal(goal.checkpoints.length, 50);
 });
 

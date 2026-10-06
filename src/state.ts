@@ -2,20 +2,21 @@
  * Pure goal state machine. Every function mutates the passed draft in place
  * and the caller persists it through GoalStore.mutate, which serializes
  * read-modify-write per session.
+ *
+ * There are no budget caps or stall auto-pauses: a goal stays active until the
+ * user pauses/clears it or the model reports complete/blocked.
  */
 
 import type {
   ArchivedGoal,
   Checkpoint,
   EvidenceRecord,
-  GoalLimits,
   GoalRecord,
   GoalStatus,
   GoalTask,
   HistoryEntry,
   UsageSnapshot,
 } from "./types.js";
-import { nowIso } from "./util.js";
 
 const MAX_HISTORY = 100;
 const MAX_CHECKPOINTS = 50;
@@ -30,13 +31,11 @@ export interface CreateGoalInput {
   objective: string;
   criteria?: string;
   constraints?: string;
-  limits: GoalLimits;
-  unbounded: boolean;
   at: string;
   /** Latest observed usage snapshot for the session (goal accounting baseline). */
   baseUsage?: UsageSnapshot;
   /** Per-goal verification override. */
-  verification?: "evidence" | "model" | "agent";
+  verification?: "evidence" | "model";
 }
 
 export function pushHistory(
@@ -67,6 +66,19 @@ function archiveEntry(goal: GoalRecord): ArchivedGoal {
   };
 }
 
+function stopClock(goal: GoalRecord, at: string): void {
+  if (!goal.activeSince) return;
+  const elapsed = Date.parse(at) - Date.parse(goal.activeSince);
+  if (Number.isFinite(elapsed) && elapsed > 0) goal.activeMs += elapsed;
+  goal.activeSince = undefined;
+}
+
+export function activeMsAt(goal: GoalRecord, at: string): number {
+  if (!goal.activeSince) return goal.activeMs;
+  const elapsed = Date.parse(at) - Date.parse(goal.activeSince);
+  return goal.activeMs + (Number.isFinite(elapsed) && elapsed > 0 ? elapsed : 0);
+}
+
 export function cancelGoal(goal: GoalRecord, reason: string, at: string): void {
   if (goal.status === "complete" || goal.status === "cancelled") return;
   stopClock(goal, at);
@@ -82,6 +94,14 @@ function supersededEntry(previous: GoalRecord, at: string): ArchivedGoal {
   const archived = { ...previous, history: [...previous.history] };
   cancelGoal(archived, "superseded by a new goal", at);
   return archiveEntry(archived);
+}
+
+let goalCounter = 0;
+function makeGoalID(at: string): string {
+  goalCounter += 1;
+  return `goal_${Date.parse(at).toString(36)}_${goalCounter.toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
 }
 
 export function startGoal(previous: GoalRecord | undefined, input: CreateGoalInput): GoalRecord {
@@ -103,50 +123,22 @@ export function startGoal(previous: GoalRecord | undefined, input: CreateGoalInp
     updatedAt: input.at,
     activeSince: input.at,
     activeMs: 0,
-    limits: { ...input.limits },
-    unbounded: input.unbounded,
     verification: input.verification,
     used: { turns: 0, contextTokens: 0, burnTokens: 0, cost: 0 },
     base: input.baseUsage ? { ...input.baseUsage } : previous?.lastUsage ? { ...previous.lastUsage } : undefined,
-    stall: { noToolTurns: 0, noProgressTurns: 0, lastOutputTokens: 0 },
-    tasks: [],
     promptFailures: 0,
     evidence: [],
     checkpoints: [],
     history: [],
     archive,
+    tasks: [],
   };
   pushHistory(goal, "created", "-", "active");
   return goal;
 }
 
-let goalCounter = 0;
-function makeGoalID(at: string): string {
-  goalCounter += 1;
-  return `goal_${Date.parse(at).toString(36)}_${goalCounter.toString(36)}_${Math.random()
-    .toString(36)
-    .slice(2, 8)}`;
-}
-
-function stopClock(goal: GoalRecord, at: string): void {
-  if (!goal.activeSince) return;
-  const elapsed = Date.parse(at) - Date.parse(goal.activeSince);
-  if (Number.isFinite(elapsed) && elapsed > 0) goal.activeMs += elapsed;
-  goal.activeSince = undefined;
-}
-
-export function activeMsAt(goal: GoalRecord, at: string): number {
-  if (!goal.activeSince) return goal.activeMs;
-  const elapsed = Date.parse(at) - Date.parse(goal.activeSince);
-  return goal.activeMs + (Number.isFinite(elapsed) && elapsed > 0 ? elapsed : 0);
-}
-
-function canWork(status: GoalStatus): boolean {
-  return status === "active";
-}
-
 export function pauseGoal(goal: GoalRecord, reason: string, at: string): void {
-  if (!canWork(goal.status)) return;
+  if (goal.status !== "active") return;
   stopClock(goal, at);
   const from = goal.status;
   goal.status = "paused";
@@ -185,15 +177,6 @@ export function completeGoal(goal: GoalRecord, evidence: EvidenceRecord, at: str
   goal.updatedAt = at;
   goal.evidence.push(evidence);
   pushHistory(goal, "complete", from, "complete", evidence.summary);
-}
-
-export function limitGoal(goal: GoalRecord, status: GoalStatus, reason: string, at: string): void {
-  if (goal.status !== "active") return;
-  stopClock(goal, at);
-  goal.status = status;
-  goal.stopReason = reason;
-  goal.updatedAt = at;
-  pushHistory(goal, "limited", "active", status, reason);
 }
 
 export function editGoal(goal: GoalRecord, objective: string, at: string): void {
@@ -261,12 +244,9 @@ function isProgressTool(tool: string): boolean {
 }
 
 export function recordCheckpoint(goal: GoalRecord, checkpoint: Checkpoint): void {
-  if (!canWork(goal.status)) return;
+  if (goal.status !== "active") return;
   goal.checkpoints.push(checkpoint);
   if (goal.checkpoints.length > MAX_CHECKPOINTS) goal.checkpoints = goal.checkpoints.slice(-MAX_CHECKPOINTS);
-  if (checkpoint.progress || isProgressTool(checkpoint.tool)) {
-    goal.stall.noToolTurns = 0;
-  }
   goal.updatedAt = checkpoint.at;
   pushHistory(goal, "checkpoint", goal.status, goal.status, checkpoint.summary);
 }
@@ -276,13 +256,10 @@ export function recordCheckpoint(goal: GoalRecord, checkpoint: Checkpoint): void
  * `snapshot` is the session's cumulative usage (what `session.usage.updated`
  * reports). The optional `call` argument is the per-call delta between this
  * snapshot and the previous one; only that delta represents the actual context
- * window of the latest model call, which is what `maxTokens` compares against.
- * Using the cumulative snapshot here would trip the cap instantly on any long
- * session (found live on a 7.6M-token session).
+ * window of the latest model call.
  */
 export function accountUsage(goal: GoalRecord, snapshot: UsageSnapshot, call?: UsageSnapshot): void {
   if (!goal.base) {
-    // Baseline unknown (plugin started mid-session): start counting from now.
     goal.base = { ...snapshot };
   }
   goal.lastUsage = { ...snapshot };
@@ -300,67 +277,10 @@ export function accountUsage(goal: GoalRecord, snapshot: UsageSnapshot, call?: U
   goal.used.cost = Math.max(0, snapshot.cost - goal.base.cost);
 }
 
-export interface TurnSettlement {
-  wasGoalTurn: boolean;
-  hadToolCall: boolean;
-  outputDelta: number;
-  at: string;
-  stallOutputTokens: number;
-}
-
-export interface LimitVerdict {
-  status: GoalStatus;
-  reason: string;
-}
-
-/** Settle one turn boundary and evaluate limits. Returns a verdict when a cap tripped. */
-export function settleTurn(goal: GoalRecord, settlement: TurnSettlement): LimitVerdict | undefined {
-  goal.updatedAt = settlement.at;
-  if (!canWork(goal.status)) return undefined;
-
-  if (settlement.wasGoalTurn) {
-    goal.stall.noToolTurns = settlement.hadToolCall ? 0 : goal.stall.noToolTurns + 1;
-    goal.stall.noProgressTurns =
-      settlement.outputDelta >= settlement.stallOutputTokens ? 0 : goal.stall.noProgressTurns + 1;
-    goal.stall.lastOutputTokens = settlement.outputDelta;
-  }
-
-  const limits = goal.limits;
-  if (goal.unbounded) {
-    if (limits.noToolCallTurns !== undefined && limits.noToolCallTurns > 0 && goal.stall.noToolTurns >= limits.noToolCallTurns) {
-      return { status: "stalled", reason: `no tool calls for ${goal.stall.noToolTurns} continuation turns` };
-    }
-    return undefined;
-  }
-
-  if (limits.maxTurns !== undefined && goal.used.turns >= limits.maxTurns) {
-    return { status: "budget_limited", reason: `max continuation turns reached (${limits.maxTurns})` };
-  }
-  if (limits.maxTokens !== undefined && goal.used.contextTokens >= limits.maxTokens) {
-    return {
-      status: "usage_limited",
-      reason: `context token cap reached (${goal.used.contextTokens} >= ${limits.maxTokens})`,
-    };
-  }
-  if (limits.maxDurationMs !== undefined && activeMsAt(goal, settlement.at) >= limits.maxDurationMs) {
-    return {
-      status: "budget_limited",
-      reason: `max duration reached (${Math.round(activeMsAt(goal, settlement.at) / 1000)}s >= ${Math.round(
-        limits.maxDurationMs / 1000,
-      )}s)`,
-    };
-  }
-  if (limits.noToolCallTurns !== undefined && limits.noToolCallTurns > 0 && goal.stall.noToolTurns >= limits.noToolCallTurns) {
-    return { status: "stalled", reason: `no tool calls for ${goal.stall.noToolTurns} continuation turns` };
-  }
-  if (limits.noProgressTurns !== undefined && limits.noProgressTurns > 0 && goal.stall.noProgressTurns >= limits.noProgressTurns) {
-    return { status: "stalled", reason: `low output for ${goal.stall.noProgressTurns} continuation turns` };
-  }
-  return undefined;
-}
-
 export function statusLabel(goal: GoalRecord): string {
   const reason = goal.stopReason ? ` (${goal.stopReason})` : "";
   const recovered = goal.recovered ? ", recovered" : "";
   return `${goal.status}${reason}${recovered}`;
 }
+
+export { isProgressTool };

@@ -1,7 +1,7 @@
 {
   "name": "opencode-goal-plugin",
   "version": "0.1.0",
-  "description": "Persistent session goals for OpenCode 2 (opencode2): /goal workflow, evidence-gated completion, budgeted auto-continuation. V2-only, zero runtime dependencies.",
+  "description": "Persistent session goals for OpenCode 2 (opencode2): /goal workflow, evidence-gated completion, automatic continuation, and a live TUI sidebar.",
   "type": "module",
   "license": "MIT",
   "main": "./dist/index.js",

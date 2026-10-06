@@ -187,6 +187,20 @@ test("clear archives the state and blocks new completion", async () => {
   const goal = await storeFor(harness).load("ses_main");
   assert.equal(goal.status, "cancelled");
   assert.match(harness.synthetics.at(-1).text, /cleared/);
+  await harness.runCommand("clear");
+  assert.match(harness.synthetics.at(-1).text, /already cancelled/);
+  controller.dispose();
+});
+
+test("a new goal supersedes and archives the previous one as cancelled", async () => {
+  const { harness, controller } = await setup();
+  await harness.runCommand("fix tests");
+  await harness.runCommand("ship the release");
+  const goal = await storeFor(harness).load("ses_main");
+  assert.equal(goal.objective, "ship the release");
+  assert.equal(goal.archive.length, 1);
+  assert.equal(goal.archive[0].status, "cancelled");
+  assert.match(goal.archive[0].stopReason, /superseded/);
   controller.dispose();
 });
 

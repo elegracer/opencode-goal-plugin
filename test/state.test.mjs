@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   accountUsage,
   activeMsAt,
+  cancelGoal,
   completeGoal,
   limitGoal,
   pauseGoal,
@@ -37,7 +38,33 @@ test("startGoal archives the previous goal and keeps the usage baseline", () => 
   const second = startGoal(first, { ...baseInput, at: "2026-01-01T00:10:00.000Z" });
   assert.equal(second.archive.length, 1);
   assert.equal(second.archive[0].objective, "fix tests");
+  assert.equal(second.archive[0].status, "cancelled");
+  assert.match(second.archive[0].stopReason, /superseded/);
   assert.deepEqual(second.base, first.lastUsage);
+});
+
+test("startGoal preserves terminal archived statuses", () => {
+  const first = startGoal(undefined, baseInput);
+  completeGoal(
+    first,
+    { at: "2026-01-01T00:00:05.000Z", candidateID: "c", tool: "shell", summary: "s", tier: "evidence", reason: "ok" },
+    "2026-01-01T00:00:05.000Z",
+  );
+  const second = startGoal(first, { ...baseInput, at: "2026-01-01T00:10:00.000Z" });
+  assert.equal(second.archive[0].status, "complete");
+});
+
+test("cancelGoal stops the clock and records one history entry", () => {
+  const goal = startGoal(undefined, baseInput);
+  cancelGoal(goal, "cleared by user", "2026-01-01T00:00:07.000Z");
+  assert.equal(goal.status, "cancelled");
+  assert.equal(goal.activeMs, 7_000);
+  assert.equal(goal.activeSince, undefined);
+  const last = goal.history[goal.history.length - 1];
+  assert.equal(last.action, "cancelled");
+  assert.equal(last.detail, "cleared by user");
+  cancelGoal(goal, "again", "2026-01-01T00:00:09.000Z");
+  assert.equal(goal.history.length, 2);
 });
 
 test("pause and resume manage the active clock", () => {

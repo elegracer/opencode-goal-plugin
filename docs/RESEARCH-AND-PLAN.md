@@ -590,10 +590,52 @@ Phase 0（探针，开发期一次性，代码进 `scripts/probe.ts`）验证宿
 - `devinoldenburg/opencode-goal-mode`：<https://github.com/devinoldenburg/opencode-goal-mode>
 - 上游 PR：#32743、#32924、#33944
 
-## 附录 B：待确认点（进入实现前需你拍板）
+## 附录 C：Codex goal 实现一手调研（2026-10-06）
 
-1. **包名**：建议 `@elegracer/opencode-goal`（npm 上 `opencode-goal-plugin` 已被占用）。
-2. **默认验证档位**：建议 P0 默认 `verification:"model"`（每次完成多一次无工具模型调用，成本低）；`"agent"` 作为可选强验证。是否接受？
-3. **默认上限**：建议默认 `10 turns / 100k tokens / 30 分钟`，`--unbounded` 显式解除。是否接受？
-4. **用户插话语义**：建议默认暂停（`onUserMessage:"pause"`），可配继续。
-5. **P0 是否需要 TUI 侧栏**：建议 P2；若你希望第一版就带，需要提前锁定 `@opentui` 版本与预编译方案。
+直接读取本机 Codex 的 goals 数据库（`~/.codex/goals_1.sqlite`）得到的一手 schema：
+
+```sql
+-- migration 1: "thread goals"
+CREATE TABLE thread_goals (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    goal_id TEXT NOT NULL,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'active','paused','blocked','usage_limited','budget_limited','complete'
+    )),
+    token_budget INTEGER,                -- 可空 = 默认无上限
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    time_used_seconds INTEGER NOT NULL DEFAULT 0,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+-- migration 2: "thread goal continuation deferrals"
+CREATE TABLE thread_goal_continuation_deferrals (
+    thread_id TEXT PRIMARY KEY NOT NULL
+        REFERENCES thread_goals(thread_id) ON DELETE CASCADE
+)
+```
+
+对插件设计的启示：
+
+1. Codex 的状态集（active/paused/blocked/usage_limited/budget_limited/complete）与本插件基本一致；本插件额外有 `cancelled`（用户 clear/supersede）与 `stalled`（空转停损），并把 stop reason 显式持久化。
+2. Codex 按 `tokens_used` + `time_used_seconds` 记账、`token_budget` 可选；本插件同样记录 token/时长/成本，另外支持回合数与上下文窗口上限。实测样本中 Codex 目标均为 `paused`（会话结束后由用户暂停），说明“暂停优先、显式恢复”的交互是共识。
+3. `thread_goal_continuation_deferrals` 把“暂停自动续跑”的意图持久化到数据库（每 thread 一行）。本插件的对应做法是把 active 状态降级为 paused（含恢复标记），语义等价且更简单；后续可考虑把 wrap-up 已发送、连续失败计数等瞬态也持久化，避免重启后重复动作。
+4. Codex 的 goal_id/thread_id 双 ID 结构与本插件 `goalID` + `sessionID` 一致，归档按 supersede 处理（本插件在 `startGoal` 中把被替换目标标记为 `cancelled (superseded)` 后归档）。
+
+### 本轮代码 review 修复（对应提交）
+
+- `/goal clear`：清理语义单次迁移完成（原来两次 mutate 且对已完成目标误报 "cleared"），现在对 complete/cancelled 正确回执 "already …; nothing to clear"。
+- 目标替换（`/goal` 重新设定或 `goal_set`）：被替换的旧目标在归档前标记为 `cancelled (superseded by a new goal)` 并停止计时；此前会以 `active` 状态原样归档，状态语义错误。
+- 新增 `cancelGoal` 纯函数与相应测试；测试数 54。
+
+
+## 附录 B：关键决策（已确认）
+
+1. **包名/仓库**：GitHub 仓库 `elegracer/opencode-goal-plugin`，包名 `opencode-goal-plugin`；通过 `github:` / `git+https://…` 安装（不发布 npm）。
+2. **默认验证**：`verification:"model"`；显式 `verifierModel` 失败即拒绝（fail-closed），隐式验证器不可用时降级 evidence 并在审计记录中标记。
+3. **默认上限**：10 turns / 100k context tokens / 30 分钟；`--unbounded` 显式解除。
+4. **用户插话**：默认暂停（`onUserMessage:"pause"`），可配置继续。
+5. **TUI 侧栏**：P2，暂不实现；命令回执经 synthetic 消息由模型转述。
+6. **持久化**：仅用 `ctx.storage`；重启后 active → paused(recovered)，显式恢复。

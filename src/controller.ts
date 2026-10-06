@@ -31,6 +31,7 @@ import {
   accountUsage,
   activeMsAt,
   blockGoal,
+  cancelGoal,
   completeGoal,
   editGoal,
   limitGoal,
@@ -691,27 +692,27 @@ export class GoalController implements GoalToolApiLike {
         return;
       }
       case "clear": {
+        const state: { outcome: "none" | "already" | "cleared" } = { outcome: "none" };
         const updated = await this.store.mutate(sessionID, (current) => {
-          if (current && current.status !== "complete" && current.status !== "cancelled") {
-            pauseGoal(current, "cleared by user", nowIso());
+          if (!current) return current;
+          if (current.status === "complete" || current.status === "cancelled") {
+            state.outcome = "already";
+            return current;
           }
+          cancelGoal(current, "cleared by user", nowIso());
+          state.outcome = "cleared";
           return current;
         });
-        if (updated && updated.status !== "complete") {
-          await this.store.mutate(sessionID, (current) => {
-            if (current) {
-              const from = current.status;
-              current.status = "cancelled";
-              current.stopReason = "cleared by user";
-              current.updatedAt = nowIso();
-              pushHistory(current, "cleared", from, "cancelled");
-            }
-            return current;
-          });
-        }
         this.loop.cancel(sessionID);
         this.candidates.clear(sessionID);
-        await this.reply(sessionID, updated ? "🧹 Goal cleared." : "No goal to clear.");
+        await this.reply(
+          sessionID,
+          state.outcome === "cleared"
+            ? "🧹 Goal cleared."
+            : state.outcome === "already"
+              ? `Goal is already ${updated?.status ?? "closed"}; nothing to clear.`
+              : "No goal to clear.",
+        );
         return;
       }
       default:

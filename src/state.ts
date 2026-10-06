@@ -66,8 +66,25 @@ function archiveEntry(goal: GoalRecord): ArchivedGoal {
   };
 }
 
+export function cancelGoal(goal: GoalRecord, reason: string, at: string): void {
+  if (goal.status === "complete" || goal.status === "cancelled") return;
+  stopClock(goal, at);
+  const from = goal.status;
+  goal.status = "cancelled";
+  goal.stopReason = reason;
+  goal.updatedAt = at;
+  pushHistory(goal, "cancelled", from, "cancelled", reason);
+}
+
+function supersededEntry(previous: GoalRecord, at: string): ArchivedGoal {
+  if (previous.status === "complete" || previous.status === "cancelled") return archiveEntry(previous);
+  const archived = { ...previous, history: [...previous.history] };
+  cancelGoal(archived, "superseded by a new goal", at);
+  return archiveEntry(archived);
+}
+
 export function startGoal(previous: GoalRecord | undefined, input: CreateGoalInput): GoalRecord {
-  const archive = previous ? [...(previous.archive ?? []), archiveEntry(previous)] : [];
+  const archive = previous ? [...(previous.archive ?? []), supersededEntry(previous, input.at)] : [];
   while (archive.length > MAX_ARCHIVE) archive.shift();
 
   const goal: GoalRecord = {

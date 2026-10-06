@@ -3,7 +3,13 @@
   "private": true,
   "description": "Dev-only toolchain for opencode-goal-plugin. Kept out of the package manifest so git installs skip npm's git preparation step.",
   "devDependencies": {
-    "esbuild": "^0.25.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@opentui/core": "^0.5.14",
+    "@opentui/solid": "^0.5.14",
+    "solid-js": "^1.9.12",
+    "bun": "^1.2.0"
+  },
+  "allowScripts": {
+    "bun@1.4.2": true
   }
 }

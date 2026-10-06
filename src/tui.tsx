@@ -2,9 +2,10 @@
 /**
  * OpenCode 2 CLI (TUI) plugin: a goal sidebar in `sidebar.content`.
  *
- * Compiled to `dist/tui.js` with esbuild (the host's JSX transform skips
- * `.tsx` under node_modules). Renders nothing when the server plugin or RPC
- * is unavailable. All host APIs are accessed defensively.
+ * Compiled to `dist/tui.js` with the `@opentui/solid` Bun plugin (the host's
+ * JSX transform skips `.tsx` under node_modules). Bare specifiers are left
+ * external so the host resolves them to its own Solid/OpenTUI instances.
+ * Renders nothing when the server plugin or the RPC is unavailable.
  */
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { GoalRpc, type GoalRpcSnapshot } from "./rpc";
@@ -93,7 +94,7 @@ function GoalSidebar(props: { context: any; sessionID: string }) {
   }
 
   return (
-    <Show when={goal()} fallback={<text>{`GOAL-NOGOAL rpc=${String(Boolean(client))}`}</text>}>
+    <Show when={goal()}>
       {(current) => (
         <box flexDirection="column">
           <text>{`🎯 Goal · ${current().status}`}</text>

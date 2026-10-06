@@ -3,8 +3,9 @@
 Persistent session goals for **OpenCode 2** (`opencode2`): a `/goal` workflow, evidence-gated completion, budgeted auto-continuation, and crash recovery.
 
 - **V2-only.** Uses the OpenCode 2 `plugins` config and `Plugin.define` contract. It does not export a V1 `server()` hook.
-- **Zero runtime dependencies.** The package imports nothing at runtime, so installing from git does not need a build step or a dependency install.
+- **Zero runtime dependencies.** The package imports nothing at runtime, so installing from git does not need a build step or a dependency install. OpenTUI/Solid are declared as peers so npm provisions them for the TUI sidebar.
 - **Correct by design.** Completion requires a real tool-call evidence candidate and is independently verified (model or agent tier) before a goal is marked complete.
+- **TUI sidebar + RPC.** The package exports `./tui`; the CLI loads it automatically and renders a live goal widget in `sidebar.content` (status, budget, task progress), pushed by a `goals.get` / `goals.updated` RPC on the server plugin.
 
 ## Install
 
@@ -35,9 +36,11 @@ opencode2 plugin add git+https://github.com/elegracer/opencode-goal-plugin.git
 
 > `git+https://…` (or the `github:` shorthand) is the canonical git spec; a bare `https://github.com/…` URL is treated as a tarball URL by package managers and does not work. Branches/tags/commits are supported: `git+https://github.com/elegracer/opencode-goal-plugin.git#main`.
 >
-> The package has zero runtime dependencies, no npm scripts, and no lockfile, and commits its compiled `dist/` plus a root `index.js` entry. That is deliberate: the OpenCode 2 host's embedded npm cannot run the "git dependency preparation" step on this build, but it skips preparation entirely for packages with nothing to prepare. Keeping the manifest minimal makes `github:` / `git+https://…` installs work out of the box.
+> The package has zero runtime dependencies, no npm scripts, and no lockfile, and commits its compiled `dist/` plus a root `index.js` entry. That is deliberate: the OpenCode 2 host's embedded npm cannot run the "git dependency preparation" step on this build, but it skips preparation entirely for packages with nothing to prepare. Keeping the manifest minimal makes `github:` / `git+https://…` installs work out of the box. (OpenTUI/Solid peers are provisioned by the installer for the TUI sidebar.)
 >
-> Verified against OpenCode `v2.0.22` on Linux: git install via `opencode2 plugin add`, plugin load, tool calls, command handling, auto-continuation, and evidence-gated completion.
+> No `cli.json` entry is needed: the CLI discovers the `./tui` export of plugins configured in `opencode.json(c)` automatically.
+>
+> Verified against OpenCode `v2.0.22` on Linux: git install via `opencode2 plugin add`, plugin load, tool calls, command handling, auto-continuation, evidence-gated completion, and the live TUI sidebar.
 
 With options (all optional):
 
@@ -125,7 +128,7 @@ The model gets a small tool surface, all persisted and audited:
 ## How it works
 
 1. **Context injection** — on every primary model call, `session.hook("context")` injects a `<goal_context>` block (objective, criteria, constraints, budget, tasks, checkpoints, evidence IDs). The goal text is labeled as user task data and cannot override system/developer/tool policies. Because the block is re-injected each call, compaction cannot lose the goal; additionally the `session.hook("compaction")` hook adds a one-line goal snapshot to the summarizer so the summary itself mentions the goal and its task progress.
-2. **Auto-continuation** — turn boundaries come from `session.execution.succeeded` (with `session.idle` only as a fallback, deduplicated by event id and a time window). At most one continuation prompt is in flight per session; user prompts pause continuation by default; `session.execution.interrupted` with reason `user` pauses, while `shutdown`/`superseded`/`inactivity` only cancel pending work; failures are paused only when no automatic retry follows.
+2. **Auto-continuation** — turn boundaries come from `session.execution.succeeded` (with `session.idle` only as a fallback, deduplicated by event id and a time window; once execution events are observed, idle is ignored entirely). At most one continuation prompt is in flight per session; user prompts pause continuation by default; `session.execution.interrupted` with reason `user` pauses, while `shutdown`/`superseded`/`inactivity` only cancel pending work; failures are paused only when no automatic retry follows. Continuations are also deduplicated **across plugin instances** that share the same storage: a persisted `lastContinuationAt` window plus a storage-nonce claim arbitration guarantees exactly one prompt per boundary even if several live instances observe the same event (a real bug found and fixed: two prompts 2 ms apart).
 3. **Budget accounting** — token/cost usage comes from `session.usage.updated` (accurate, not estimated). The host reports cumulative session totals, so the plugin differences consecutive snapshots to recover the latest call's own context window (`input + cached input + output + reasoning`) — that per-call number is what `maxTokens` compares against, meaning long session history never counts against a goal's cap. Goals also count continuation turns, cumulative burn, and wall-clock active time. Default caps: 10 turns / 100k context tokens / 30 minutes; `--unbounded` opts out. When a cap trips, the goal becomes `budget_limited` / `usage_limited` / `stalled` and one wrap-up prompt asks for a summary.
 4. **Evidence-gated completion** — every successful tool call is recorded as an evidence candidate keyed by its real call ID. `goal_update complete` must reference one of those exact IDs with a specific summary. Then:
    - `verification: "evidence"` — structural gate only;
@@ -135,6 +138,7 @@ The model gets a small tool surface, all persisted and audited:
 5. **Persistence and recovery** — goal state lives in host plugin storage (`ctx.storage`) per project/location/session. On startup, any goal still `active` is downgraded to `paused (recovered)` so unattended continuation never resumes blindly; `/goal resume` continues it.
 6. **Session scoping** — only root sessions of the plugin's project/location drive continuation. Child (subagent) sessions never drive the loop, but they see the parent goal in context and can read it with `goal_get`.
 7. **Command replies** — OpenCode 2 does not expose a plugin API that writes a user-visible chat message directly; `/goal …` results are delivered as synthetic messages that the model relays to the user on its next turn. State mutations themselves are local and do not depend on the model.
+8. **TUI sidebar (RPC)** — the server plugin registers a `goals.get` RPC and emits `goals.updated` on every goal write (debounced). The `./tui` entry renders a sidebar widget that fetches the snapshot and refreshes on those events; it renders nothing when no goal exists or the RPC is unavailable.
 
 ## Options
 
@@ -167,15 +171,16 @@ The model gets a small tool surface, all persisted and audited:
 
 ## Development
 
-The published manifest intentionally has no scripts, devDependencies, or lockfile so git installs skip npm's git-preparation step (see Install). Develop with direct commands:
+The published manifest intentionally has no scripts, devDependencies, or lockfile so git installs skip npm's git-preparation step (see Install). Dev tooling lives in `dev/`:
 
 ```sh
-npm install --no-save typescript   # dev-only, does not modify package.json
-npx tsc -p tsconfig.json           # typecheck + build dist/
-node --test "test/*.test.mjs"      # unit/integration tests (run after build)
+cd dev && npm install
+dev/node_modules/.bin/tsc -p tsconfig.json    # typecheck + build server/rpc -> dist/
+dev/node_modules/.bin/bun dev/build-tui.mjs   # build the TUI sidebar (OpenTUI Solid plugin) -> dist/tui.js
+node --test "test/*.test.mjs"                 # unit/integration tests (run after build)
 ```
 
-`dist/` is committed on purpose so installs work without a build step. After changing `src/`, run `npx tsc -p tsconfig.json` and commit the updated `dist/`.
+`dist/` is committed on purpose so installs work without a build step. After changing `src/`, rebuild `dist/` and commit it. The TUI must be built with the `@opentui/solid` Bun plugin (see `dev/build-tui.mjs`); plain esbuild/tsc output imports a private Solid runtime and the widget will not re-render.
 
 ## License
 
